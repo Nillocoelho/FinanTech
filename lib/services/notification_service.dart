@@ -6,7 +6,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 /// Serviço responsável por gerenciar notificações locais do aplicativo.
 /// 
 /// Este serviço permite agendar lembretes mensais para que o usuário
-/// revise seus gastos no dia 10 de cada mês às 09:00.
+/// revise seus gastos. O dia e horário são configuráveis pelo usuário.
 class NotificationService {
   // Instância singleton
   static final NotificationService _instance = NotificationService._internal();
@@ -20,8 +20,16 @@ class NotificationService {
   // ID único para o lembrete mensal (usado para cancelar/atualizar)
   static const int _monthlyReminderId = 1;
 
-  // Chave para salvar preferência do lembrete
+  // Chaves para salvar preferências
   static const String _reminderEnabledKey = 'monthly_reminder_enabled';
+  static const String _reminderDayKey = 'monthly_reminder_day';
+  static const String _reminderHourKey = 'monthly_reminder_hour';
+  static const String _reminderMinuteKey = 'monthly_reminder_minute';
+
+  // Valores padrão
+  static const int defaultDay = 10;
+  static const int defaultHour = 9;
+  static const int defaultMinute = 0;
 
   // Canal de notificação Android
   static const String _channelId = 'finantech_reminders';
@@ -94,19 +102,21 @@ class NotificationService {
     }
   }
 
-  /// Agenda o lembrete mensal para o dia 10 às 09:00.
+  /// Agenda o lembrete mensal para o dia e horário configurados.
   /// 
   /// O lembrete é configurado para repetir todo mês no mesmo dia e horário.
-  /// Se a data atual já passou do dia 10, agenda para o próximo mês.
-  /// 
-  /// Usa [matchDateTimeComponents] com [DateTimeComponents.dayOfMonthAndTime]
-  /// para garantir repetição mensal.
+  /// Se a data atual já passou do dia configurado, agenda para o próximo mês.
   Future<void> scheduleMonthlyReminder() async {
     // Cancela qualquer lembrete anterior antes de agendar novo
-    await cancelMonthlyReminder();
+    await _notificationsPlugin.cancel(_monthlyReminderId);
 
-    // Calcula a próxima data do dia 10 às 09:00
-    final scheduledDate = _getNextReminderDate();
+    // Obtém as configurações do usuário
+    final day = await getReminderDay();
+    final hour = await getReminderHour();
+    final minute = await getReminderMinute();
+
+    // Calcula a próxima data para o lembrete
+    final scheduledDate = _getNextReminderDate(day, hour, minute);
 
     // Detalhes da notificação para Android
     const androidDetails = AndroidNotificationDetails(
@@ -142,7 +152,7 @@ class NotificationService {
       'Você tem gastos para revisar neste mês. Abra o app e confira.',
       scheduledDate,
       notificationDetails,
-      // Configuração para repetir mensalmente no dia 10 às 09:00
+      // Configuração para repetir mensalmente no dia e horário configurados
       matchDateTimeComponents: DateTimeComponents.dayOfMonthAndTime,
       androidScheduleMode: AndroidScheduleMode.inexactAllowWhileIdle,
       uiLocalNotificationDateInterpretation:
@@ -153,21 +163,21 @@ class NotificationService {
     await _setReminderEnabled(true);
   }
 
-  /// Calcula a próxima data para o lembrete (dia 10 às 09:00).
+  /// Calcula a próxima data para o lembrete com dia e horário personalizados.
   /// 
-  /// Se hoje já passou do dia 10, retorna o dia 10 do próximo mês.
-  /// Caso contrário, retorna o dia 10 do mês atual.
-  tz.TZDateTime _getNextReminderDate() {
+  /// Se hoje já passou do dia/horário configurado, retorna o próximo mês.
+  /// Caso contrário, retorna o mês atual.
+  tz.TZDateTime _getNextReminderDate(int day, int hour, int minute) {
     final now = tz.TZDateTime.now(tz.local);
     
-    // Data alvo: dia 10 às 09:00 do mês atual
+    // Data alvo: dia e horário configurados do mês atual
     var scheduledDate = tz.TZDateTime(
       tz.local,
       now.year,
       now.month,
-      10, // dia 10
-      9,  // 09:00
-      0,  // 00 minutos
+      day,
+      hour,
+      minute,
     );
 
     // Se a data já passou, agenda para o próximo mês
@@ -178,18 +188,18 @@ class NotificationService {
           tz.local,
           now.year + 1,
           1, // Janeiro
-          10,
-          9,
-          0,
+          day,
+          hour,
+          minute,
         );
       } else {
         scheduledDate = tz.TZDateTime(
           tz.local,
           now.year,
           now.month + 1,
-          10,
-          9,
-          0,
+          day,
+          hour,
+          minute,
         );
       }
     }
@@ -219,6 +229,55 @@ class NotificationService {
   Future<void> _setReminderEnabled(bool enabled) async {
     final prefs = await SharedPreferences.getInstance();
     await prefs.setBool(_reminderEnabledKey, enabled);
+  }
+
+  /// Obtém o dia configurado para o lembrete (padrão: 10)
+  Future<int> getReminderDay() async {
+    final prefs = await SharedPreferences.getInstance();
+    return prefs.getInt(_reminderDayKey) ?? defaultDay;
+  }
+
+  /// Obtém a hora configurada para o lembrete (padrão: 9)
+  Future<int> getReminderHour() async {
+    final prefs = await SharedPreferences.getInstance();
+    return prefs.getInt(_reminderHourKey) ?? defaultHour;
+  }
+
+  /// Obtém os minutos configurados para o lembrete (padrão: 0)
+  Future<int> getReminderMinute() async {
+    final prefs = await SharedPreferences.getInstance();
+    return prefs.getInt(_reminderMinuteKey) ?? defaultMinute;
+  }
+
+  /// Salva o dia do lembrete
+  Future<void> setReminderDay(int day) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setInt(_reminderDayKey, day);
+  }
+
+  /// Salva a hora do lembrete
+  Future<void> setReminderHour(int hour) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setInt(_reminderHourKey, hour);
+  }
+
+  /// Salva os minutos do lembrete
+  Future<void> setReminderMinute(int minute) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setInt(_reminderMinuteKey, minute);
+  }
+
+  /// Salva todas as configurações de horário e reagenda o lembrete
+  Future<void> updateReminderSchedule(int day, int hour, int minute) async {
+    await setReminderDay(day);
+    await setReminderHour(hour);
+    await setReminderMinute(minute);
+    
+    // Se o lembrete está ativo, reagenda com as novas configurações
+    final isEnabled = await isReminderEnabled();
+    if (isEnabled) {
+      await scheduleMonthlyReminder();
+    }
   }
 
   /// Alterna o estado do lembrete mensal.

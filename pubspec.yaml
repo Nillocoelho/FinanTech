@@ -33,6 +33,12 @@ dependencies:
   
   # Timezone para agendamento de notificações
   timezone: ^0.9.4
+  
+  # Seletor de arquivos
+  file_picker: ^8.0.0
+  
+  # Compartilhar arquivos
+  share_plus: ^9.0.0
 
 dev_dependencies:
   flutter_test:
