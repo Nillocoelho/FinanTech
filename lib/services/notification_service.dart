@@ -47,38 +47,44 @@ class NotificationService {
   /// - Plugin de notificações com configurações Android/iOS
   /// - Solicita permissão de notificação (Android 13+)
   Future<void> initNotifications() async {
-    // Inicializa dados de timezone
-    tz_data.initializeTimeZones();
+    try {
+      // Inicializa dados de timezone
+      tz_data.initializeTimeZones();
 
-    // Configuração para Android
-    const androidSettings = AndroidInitializationSettings('@mipmap/ic_launcher');
+      // Configuração para Android
+      const androidSettings = AndroidInitializationSettings('@mipmap/ic_launcher');
 
-    // Configuração para iOS (opcional, mas bom ter)
-    const iosSettings = DarwinInitializationSettings(
-      requestAlertPermission: true,
-      requestBadgePermission: true,
-      requestSoundPermission: true,
-    );
+      // Configuração para iOS (opcional, mas bom ter)
+      const iosSettings = DarwinInitializationSettings(
+        requestAlertPermission: true,
+        requestBadgePermission: true,
+        requestSoundPermission: true,
+      );
 
-    // Configurações gerais de inicialização
-    const initSettings = InitializationSettings(
-      android: androidSettings,
-      iOS: iosSettings,
-    );
+      // Configurações gerais de inicialização
+      const initSettings = InitializationSettings(
+        android: androidSettings,
+        iOS: iosSettings,
+      );
 
-    // Inicializa o plugin
-    await _notificationsPlugin.initialize(
-      initSettings,
-      onDidReceiveNotificationResponse: _onNotificationTapped,
-    );
+      // Inicializa o plugin
+      await _notificationsPlugin.initialize(
+        initSettings,
+        onDidReceiveNotificationResponse: _onNotificationTapped,
+      );
 
-    // Solicita permissão de notificação (Android 13+)
-    await _requestNotificationPermission();
+      // Solicita permissão de notificação (Android 13+)
+      await _requestNotificationPermission();
 
-    // Verifica se o lembrete está ativo e agenda se necessário
-    final isEnabled = await isReminderEnabled();
-    if (isEnabled) {
-      await scheduleMonthlyReminder();
+      // Verifica se o lembrete está ativo e agenda se necessário
+      final isEnabled = await isReminderEnabled();
+      if (isEnabled) {
+        await scheduleMonthlyReminder();
+      }
+    } catch (e) {
+      // Ignora erros de inicialização - o app continua funcionando
+      // ignore: avoid_print
+      print('Erro ao inicializar notificações: $e');
     }
   }
 

@@ -10,8 +10,13 @@ void main() async {
   // Garante que o Flutter esteja inicializado antes de rodar o app
   WidgetsFlutterBinding.ensureInitialized();
   
-  // Inicializa o serviço de notificações
-  await NotificationService().initNotifications();
+  // Inicializa o serviço de notificações (com tratamento de erro)
+  try {
+    await NotificationService().initNotifications();
+  } catch (e) {
+    // Se falhar, o app continua funcionando sem notificações
+    debugPrint('Erro ao inicializar notificações: $e');
+  }
   
   runApp(const FinanTechApp());
 }

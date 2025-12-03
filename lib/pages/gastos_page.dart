@@ -458,17 +458,29 @@ class _GastosPageState extends State<GastosPage> {
           ),
         ],
       ),
-      body: Column(children: [
-        _buildSeletorMesAno(),
-        _buildFormularioGasto(),
-        const Divider(height: 1),
-        if (_temFiltrosAtivos) _buildIndicadorFiltrosAtivos(),
-        Expanded(
-            child: _isLoading
-                ? const Center(child: CircularProgressIndicator())
-                : _buildListaGastos()),
-        _buildTotalizador(),
-      ]),
+      body: GestureDetector(
+        onHorizontalDragEnd: (details) {
+          // Swipe para a esquerda (avança para o próximo mês)
+          if (details.primaryVelocity != null && details.primaryVelocity! < -300) {
+            _proximoMes();
+          }
+          // Swipe para a direita (volta para o mês anterior)
+          else if (details.primaryVelocity != null && details.primaryVelocity! > 300) {
+            _mesAnterior();
+          }
+        },
+        child: Column(children: [
+          _buildSeletorMesAno(),
+          _buildFormularioGasto(),
+          const Divider(height: 1),
+          if (_temFiltrosAtivos) _buildIndicadorFiltrosAtivos(),
+          Expanded(
+              child: _isLoading
+                  ? const Center(child: CircularProgressIndicator())
+                  : _buildListaGastos()),
+          _buildTotalizador(),
+        ]),
+      ),
     );
   }
 
