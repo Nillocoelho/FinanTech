@@ -1,0 +1,59 @@
+name: finantech
+description: Aplicativo simples para controle de gastos mensais usando SQLite.
+publish_to: 'none'
+version: 1.0.0+1
+
+environment:
+  sdk: '>=3.0.0 <4.0.0'
+
+dependencies:
+  flutter:
+    sdk: flutter
+  
+  # Ícones do Material Design
+  cupertino_icons: ^1.0.6
+  
+  # SQLite para armazenamento local
+  sqflite: ^2.3.0
+  
+  # Para obter o caminho do diretório do app
+  path_provider: ^2.1.1
+  
+  # Utilitário para trabalhar com caminhos
+  path: ^1.8.3
+  
+  # Formatação de valores monetários
+  intl: ^0.18.1
+  
+  # Persistência de preferências do usuário
+  shared_preferences: ^2.2.2
+  
+  # Notificações locais
+  flutter_local_notifications: ^17.2.4
+  
+  # Timezone para agendamento de notificações
+  timezone: ^0.9.4
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^3.0.0
+  
+  # SQLite para testes em desktop/CI
+  sqflite_common_ffi: ^2.3.3
+  
+  # Gerador de ícones do app
+  flutter_launcher_icons: ^0.13.1
+
+flutter_launcher_icons:
+  android: true
+  ios: true
+  image_path: "assets/images/icon.png"
+  adaptive_icon_background: "#FFFFFF"
+  adaptive_icon_foreground: "assets/images/icon.png"
+
+flutter:
+  uses-material-design: true
+  
+  assets:
+    - assets/images/

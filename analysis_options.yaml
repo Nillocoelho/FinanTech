@@ -1,0 +1,18 @@
+include: package:flutter_lints/flutter.yaml
+
+linter:
+  rules:
+    # Evita usar print em produção
+    avoid_print: true
+    
+    # Prefere usar const quando possível
+    prefer_const_constructors: true
+    prefer_const_literals_to_create_immutables: true
+    
+    # Documentação
+    public_member_api_docs: false
+    
+    # Outras regras úteis
+    prefer_final_locals: true
+    avoid_unnecessary_containers: true
+    sized_box_for_whitespace: true
