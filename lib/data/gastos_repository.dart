@@ -130,6 +130,52 @@ class GastosRepository {
     );
   }
 
+  /// Busca um gasto pela origem em um mês/ano específico.
+  ///
+  /// Quando houver mais de um registro correspondente, retorna o mais recente.
+  Future<Gasto?> getGastoComOrigem(String origem, int mes, int ano, {int? excludeId}) async {
+    final db = await _databaseHelper.database;
+
+    String query = '''
+      SELECT *
+      FROM ${DatabaseHelper.tableGastos}
+      WHERE LOWER(origem) = LOWER(?) AND mes = ? AND ano = ?
+    ''';
+    final args = <dynamic>[origem.trim(), mes, ano];
+
+    if (excludeId != null) {
+      query += ' AND id != ?';
+      args.add(excludeId);
+    }
+
+    query += ' ORDER BY createdAt DESC, id DESC LIMIT 1';
+
+    final result = await db.rawQuery(query, args);
+    if (result.isEmpty) {
+      return null;
+    }
+
+    return Gasto.fromMap(result.first);
+  }
+
+  /// Insere um novo gasto ou soma seu valor a um gasto existente da mesma origem/mês/ano.
+  ///
+  /// Retorna `somado = true` quando um registro existente foi atualizado.
+  Future<({bool somado, Gasto gasto})> salvarSomandoSeExistir(Gasto gasto) async {
+    final gastoExistente = await getGastoComOrigem(gasto.origem, gasto.mes, gasto.ano);
+
+    if (gastoExistente == null) {
+      final id = await insertGasto(gasto);
+      return (somado: false, gasto: gasto.copyWith(id: id));
+    }
+
+    final gastoAtualizado = gastoExistente.copyWith(
+      valor: gastoExistente.valor + gasto.valor,
+    );
+    await updateGasto(gastoAtualizado);
+    return (somado: true, gasto: gastoAtualizado);
+  }
+
   /// Retorna a lista de todas as origens distintas já cadastradas
   /// 
   /// Útil para sugestões de autocompletar no campo de origem.
@@ -151,23 +197,13 @@ class GastosRepository {
   /// [excludeId] opcional para excluir um gasto específico (útil na edição)
   /// Retorna true se já existe, false caso contrário
   Future<bool> existeGastoComOrigem(String origem, int mes, int ano, {int? excludeId}) async {
-    final db = await _databaseHelper.database;
-    
-    String query = '''
-      SELECT COUNT(*) as count
-      FROM ${DatabaseHelper.tableGastos}
-      WHERE LOWER(origem) = LOWER(?) AND mes = ? AND ano = ?
-    ''';
-    List<dynamic> args = [origem.trim(), mes, ano];
-    
-    if (excludeId != null) {
-      query += ' AND id != ?';
-      args.add(excludeId);
-    }
-    
-    final result = await db.rawQuery(query, args);
-    final count = (result.first['count'] as num).toInt();
-    return count > 0;
+    final gasto = await getGastoComOrigem(
+      origem,
+      mes,
+      ano,
+      excludeId: excludeId,
+    );
+    return gasto != null;
   }
 
   /// Retorna estatísticas gerais de um mês/ano

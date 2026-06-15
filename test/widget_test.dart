@@ -10,6 +10,7 @@ void main() {
     
     // Verifica se o título está presente
     expect(find.text('Gastos Mensais'), findsOneWidget);
+    expect(find.text('Adicionar gasto'), findsOneWidget);
     
     // Verifica se o AppBar está presente
     expect(find.byType(AppBar), findsOneWidget);

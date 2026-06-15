@@ -280,5 +280,62 @@ void main() {
       expect(origens.length, 2);
       expect(origens, containsAll(['Inter', 'Santander']));
     });
+
+    test('getGastoComOrigem deve retornar o gasto existente do mês/ano', () async {
+      await repository.insertGasto(Gasto(
+        origem: 'Santander',
+        valor: 100.0,
+        pago: false,
+        mes: 12,
+        ano: 2025,
+        createdAt: DateTime.now().toIso8601String(),
+      ));
+
+      final gasto = await repository.getGastoComOrigem('santander', 12, 2025);
+      expect(gasto, isNotNull);
+      expect(gasto!.origem, 'Santander');
+      expect(gasto.valor, 100.0);
+    });
+
+    test('salvarSomandoSeExistir deve inserir quando não houver duplicado', () async {
+      final resultado = await repository.salvarSomandoSeExistir(Gasto(
+        origem: 'Nubank',
+        valor: 250.0,
+        pago: false,
+        mes: 12,
+        ano: 2025,
+        createdAt: DateTime.now().toIso8601String(),
+      ));
+
+      final gastos = await repository.getGastosDoMes(12, 2025);
+      expect(resultado.somado, false);
+      expect(gastos.length, 1);
+      expect(gastos.first.valor, 250.0);
+    });
+
+    test('salvarSomandoSeExistir deve somar valor ao gasto existente', () async {
+      await repository.insertGasto(Gasto(
+        origem: 'Santander',
+        valor: 100.0,
+        pago: false,
+        mes: 12,
+        ano: 2025,
+        createdAt: DateTime.now().toIso8601String(),
+      ));
+
+      final resultado = await repository.salvarSomandoSeExistir(Gasto(
+        origem: 'Santander',
+        valor: 50.0,
+        pago: false,
+        mes: 12,
+        ano: 2025,
+        createdAt: DateTime.now().toIso8601String(),
+      ));
+
+      final gastos = await repository.getGastosDoMes(12, 2025);
+      expect(resultado.somado, true);
+      expect(gastos.length, 1);
+      expect(gastos.first.valor, 150.0);
+    });
   });
 }

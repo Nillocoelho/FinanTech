@@ -242,25 +242,17 @@ class CsvService {
             anoGasto = ano + 1;
           }
           
-          // Verifica se já existe
-          final existe = await _repository.existeGastoComOrigem(
-            origem, mesNum, anoGasto
+          final gasto = Gasto(
+            origem: origem,
+            valor: valor,
+            pago: false,
+            mes: mesNum,
+            ano: anoGasto,
+            createdAt: DateTime.now().toIso8601String(),
           );
-          
-          if (!existe) {
-            // Cria o gasto
-            final gasto = Gasto(
-              origem: origem,
-              valor: valor,
-              pago: false,
-              mes: mesNum,
-              ano: anoGasto,
-              createdAt: DateTime.now().toIso8601String(),
-            );
-            
-            await _repository.insertGasto(gasto);
-            importados++;
-          }
+
+          await _repository.salvarSomandoSeExistir(gasto);
+          importados++;
         }
         mesIdx++;
       }
