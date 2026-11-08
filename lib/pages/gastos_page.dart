@@ -5,7 +5,7 @@ import '../data/preferences_service.dart';
 import '../models/gasto.dart';
 import '../ui/finance_theme.dart';
 import '../ui/finance_widgets.dart';
-import '../utils/installment_helper.dart';
+import '../widgets/planning_widgets.dart';
 import '../widgets/expense_editor.dart';
 import 'configuracoes_page.dart';
 
@@ -28,6 +28,8 @@ class _GastosPageState extends State<GastosPage> {
   late DateTime _period;
   List<Gasto> _expenses = [];
   List<String> _origins = [];
+  Map<DateTime, double> _futureTotals = {};
+  String? _category;
   bool _loading = true;
   bool _saving = false;
   String? _error;
@@ -89,14 +91,22 @@ class _GastosPageState extends State<GastosPage> {
       _error = null;
     });
     try {
+      final period = _period;
+      await _repository.prepararMes(period.month, period.year, now: _now);
       final result = await Future.wait([
-        _repository.getGastosDoMes(_period.month, _period.year),
+        _repository.getGastosDoMes(period.month, period.year),
         _repository.getOrigensDistintas(),
+        _repository.getCompromissosFuturos(period.month, period.year),
       ]);
       if (!mounted || generation != _loadGeneration) return;
       setState(() {
         _expenses = result[0] as List<Gasto>;
+        if (_category != null &&
+            !_expenses.any((g) => g.categoria == _category)) {
+          _category = null;
+        }
         _origins = result[1] as List<String>;
+        _futureTotals = result[2] as Map<DateTime, double>;
         _loading = false;
       });
     } catch (_) {
@@ -109,7 +119,10 @@ class _GastosPageState extends State<GastosPage> {
   }
 
   Future<void> _changePeriod(DateTime period) async {
-    setState(() => _period = period);
+    setState(() {
+      _period = period;
+      _category = null;
+    });
     await _load();
     try {
       await _preferences.salvarMesAnoSelecionado(period.month, period.year);
@@ -124,6 +137,7 @@ class _GastosPageState extends State<GastosPage> {
         .where(
           (g) =>
               g.origem.toLowerCase().contains(query) &&
+              (_category == null || g.categoria == _category) &&
               switch (_filter) {
                 FiltroStatus.todos => true,
                 FiltroStatus.abertos => !g.pago,
@@ -161,64 +175,79 @@ class _GastosPageState extends State<GastosPage> {
   }
 
   Future<void> _edit([Gasto? expense]) async {
+    if (_saving) return;
+    var editSeries = false;
+    if (expense?.recorrenciaId != null && expense!.recorrenciaAtiva) {
+      final scope = await showDialog<bool>(
+        context: context,
+        builder: (ctx) => AlertDialog(
+          title: const Text('Editar conta recorrente'),
+          content: const Text(
+            'Escolha se a alteração vale apenas para este lançamento ou para as contas em aberto a partir deste mês. Contas pagas não serão alteradas pela edição da recorrência.',
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(ctx, false),
+              child: const Text('Só este lançamento'),
+            ),
+            FilledButton(
+              onPressed: () => Navigator.pop(ctx, true),
+              child: const Text('Próximos em aberto'),
+            ),
+          ],
+        ),
+      );
+      if (scope == null || !mounted) return;
+      editSeries = scope;
+    }
+    if (!mounted) return;
+    final period = _period;
     final draft = await showModalBottomSheet<ExpenseDraft>(
       context: context,
       isScrollControlled: true,
       useSafeArea: true,
-      builder: (_) =>
-          ExpenseEditor(period: _period, origins: _origins, expense: expense),
+      builder: (_) => ExpenseEditor(
+        period: period,
+        origins: _origins,
+        expense: expense,
+        seriesEdit: editSeries,
+      ),
     );
-    if (draft == null || !mounted) return;
+    if (draft == null || !mounted || _saving) return;
     setState(() => _saving = true);
     try {
       if (expense != null) {
-        if (await _repository.existeGastoComOrigem(
-          draft.name,
-          expense.mes,
-          expense.ano,
-          excludeId: expense.id,
-        )) {
-          _message('Já existe uma conta com esse nome neste mês.');
-          return;
+        final edited = expense.copyWith(
+          origem: draft.name,
+          valor: draft.amount,
+          vencimento: draft.due,
+          categoria: draft.category,
+        );
+        if (editSeries) {
+          await _repository.atualizarRecorrencia(
+            expense.recorrenciaId!,
+            edited,
+          );
+        } else {
+          await _repository.updateGasto(edited);
         }
-        await _repository.updateGasto(
-          expense.copyWith(
-            origem: draft.name,
-            valor: draft.amount,
-            vencimento: draft.due,
-          ),
-        );
       } else {
-        final parts = InstallmentHelper.splitAmount(
-          draft.amount,
-          draft.installments,
+        final base = Gasto(
+          origem: draft.name,
+          valor: draft.amount,
+          pago: false,
+          mes: period.month,
+          ano: period.year,
+          createdAt: _now.toIso8601String(),
+          categoria: draft.category,
+          vencimento: draft.due,
         );
-        for (var index = 0; index < parts.length; index++) {
-          final period = InstallmentHelper.addMonths(
-            _period.month,
-            _period.year,
-            index,
-          );
-          final lastDay = DateTime(
-            draft.due.year,
-            draft.due.month + index + 1,
-            0,
-          ).day;
-          await _repository.salvarSomandoSeExistir(
-            Gasto(
-              origem: draft.name,
-              valor: parts[index],
-              pago: false,
-              mes: period.mes,
-              ano: period.ano,
-              createdAt: _now.toIso8601String(),
-              vencimento: DateTime(
-                draft.due.year,
-                draft.due.month + index,
-                draft.due.day.clamp(1, lastDay),
-              ),
-            ),
-          );
+        if (draft.recurring) {
+          await _repository.criarRecorrencia(base, now: _now);
+        } else if (draft.installments > 1) {
+          await _repository.criarParcelamento(base, draft.installments);
+        } else {
+          await _repository.salvarSomandoSeExistir(base);
         }
       }
       if (!mounted) return;
@@ -226,14 +255,68 @@ class _GastosPageState extends State<GastosPage> {
       _message(
         expense != null
             ? 'Lançamento atualizado.'
+            : draft.recurring
+            ? 'Conta recorrente criada.'
             : draft.installments > 1
             ? '${draft.installments} parcelas adicionadas.'
             : 'Lançamento adicionado.',
       );
     } catch (_) {
       _message(
-        'Não foi possível salvar. Confira os lançamentos antes de tentar novamente.',
+        'Não foi possível salvar. Confira os lançamentos e tente novamente.',
       );
+    } finally {
+      if (mounted) setState(() => _saving = false);
+    }
+  }
+
+  Future<void> _installments(Gasto expense) async {
+    try {
+      final rows = await _repository.getParcelas(expense.parcelaGrupo!);
+      if (!mounted) return;
+      await showModalBottomSheet<void>(
+        context: context,
+        isScrollControlled: true,
+        useSafeArea: true,
+        builder: (_) => InstallmentDetails(expenses: rows, reference: expense),
+      );
+    } catch (_) {
+      _message('Não foi possível abrir o parcelamento.');
+    }
+  }
+
+  Future<void> _stopRecurring(Gasto expense) async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Encerrar repetição mensal?'),
+        content: const Text(
+          'Os próximos lançamentos em aberto, após este mês, serão removidos. Este mês e os pagamentos já registrados serão mantidos.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('Cancelar'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            child: const Text('Encerrar repetição'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true || !mounted || _saving) return;
+    setState(() => _saving = true);
+    try {
+      await _repository.encerrarRecorrencia(
+        expense.recorrenciaId!,
+        expense.mes,
+        expense.ano,
+      );
+      if (mounted) await _load();
+      _message('Repetição encerrada.');
+    } catch (_) {
+      _message('Não foi possível encerrar a repetição.');
     } finally {
       if (mounted) setState(() => _saving = false);
     }
@@ -357,7 +440,7 @@ class _GastosPageState extends State<GastosPage> {
     final total = _expenses.fold<double>(0, (v, g) => v + g.valor);
     final grouped = <String, double>{};
     for (final g in _expenses) {
-      grouped.update(g.origem, (v) => v + g.valor, ifAbsent: () => g.valor);
+      grouped.update(g.categoria, (v) => v + g.valor, ifAbsent: () => g.valor);
     }
     final entries = grouped.entries.toList()
       ..sort((a, b) => b.value.compareTo(a.value));
@@ -389,7 +472,7 @@ class _GastosPageState extends State<GastosPage> {
               onDetails: () => Navigator.pop(ctx),
             ),
             const FinanceSection(
-              title: 'Distribuição por origem',
+              title: 'Distribuição por categoria',
               subtitle: 'Valores pagos e em aberto no período',
             ),
             if (entries.isEmpty)
@@ -460,7 +543,7 @@ class _GastosPageState extends State<GastosPage> {
                       color: Colors.white,
                     ),
                   )
-                : const Icon(Icons.add),
+                : const Icon(Icons.add, color: Colors.white),
           ),
           IconButton(
             tooltip: 'Ajustes',
@@ -480,6 +563,7 @@ class _GastosPageState extends State<GastosPage> {
               _tab = i;
               _filter = FiltroStatus.todos;
               _search.clear();
+              _category = null;
             });
           }
         },
@@ -603,6 +687,7 @@ class _GastosPageState extends State<GastosPage> {
                                       _tab = 1;
                                       _filter = FiltroStatus.vencidos;
                                       _search.clear();
+                                      _category = null;
                                     }),
                                     leading: const Icon(
                                       Icons.error_outline,
@@ -645,6 +730,35 @@ class _GastosPageState extends State<GastosPage> {
                                 : null,
                           ),
                           if (!overview) ...[
+                            DropdownButtonFormField<String>(
+                              key: ValueKey('category-${_category ?? 'all'}'),
+                              initialValue: _category ?? '',
+                              isExpanded: true,
+                              decoration: const InputDecoration(
+                                labelText: 'Filtrar categoria',
+                              ),
+                              items: [
+                                const DropdownMenuItem(
+                                  value: '',
+                                  child: Text('Todas as categorias'),
+                                ),
+                                ...(_expenses
+                                        .map((g) => g.categoria)
+                                        .toSet()
+                                        .toList()
+                                      ..sort())
+                                    .map(
+                                      (c) => DropdownMenuItem(
+                                        value: c,
+                                        child: Text(c),
+                                      ),
+                                    ),
+                              ],
+                              onChanged: (value) => setState(
+                                () => _category = value == '' ? null : value,
+                              ),
+                            ),
+                            const SizedBox(height: 12),
                             TextField(
                               controller: _search,
                               onChanged: (_) => setState(() {}),
@@ -740,6 +854,7 @@ class _GastosPageState extends State<GastosPage> {
                                     ? () => _edit()
                                     : () => setState(() {
                                         _search.clear();
+                                        _category = null;
                                         _filter = FiltroStatus.todos;
                                       }),
                               ),
@@ -774,9 +889,27 @@ class _GastosPageState extends State<GastosPage> {
                                   onEdit: () => _edit(visible[i]),
                                   onPay: () => _pay(visible[i]),
                                   onDelete: () => _delete(visible[i]),
+                                  onInstallments: visible[i].parcelado
+                                      ? () => _installments(visible[i])
+                                      : null,
+                                  onStopRecurring:
+                                      visible[i].recorrenciaId != null &&
+                                          visible[i].recorrenciaAtiva
+                                      ? () => _stopRecurring(visible[i])
+                                      : null,
                                 ),
                               ),
                             ),
+                    ),
+                  if (!_loading &&
+                      _error == null &&
+                      overview &&
+                      _futureTotals.values.any((v) => v > 0))
+                    SliverPadding(
+                      padding: const EdgeInsets.symmetric(horizontal: 20),
+                      sliver: SliverToBoxAdapter(
+                        child: FutureCommitments(totals: _futureTotals),
+                      ),
                     ),
                   const SliverToBoxAdapter(child: SizedBox(height: 104)),
                 ],

@@ -240,10 +240,13 @@ class ExpenseRow extends StatelessWidget {
     required this.onEdit,
     required this.onPay,
     required this.onDelete,
+    this.onInstallments,
+    this.onStopRecurring,
   });
   final Gasto gasto;
   final DateTime now;
   final VoidCallback onEdit, onPay, onDelete;
+  final VoidCallback? onInstallments, onStopRecurring;
   @override
   Widget build(BuildContext context) {
     final overdue = gasto.vencidoEm(now);
@@ -309,6 +312,29 @@ class ExpenseRow extends StatelessWidget {
                       fontWeight: FontWeight.w500,
                     ),
                   ),
+                  const SizedBox(height: 4),
+                  Text(
+                    gasto.categoria,
+                    style: const TextStyle(
+                      fontSize: 11,
+                      color: FinanceColors.muted,
+                    ),
+                  ),
+                  if (gasto.parcelado || gasto.recorrenciaId != null) ...[
+                    const SizedBox(height: 4),
+                    Text(
+                      gasto.parcelado
+                          ? 'Parcela ${gasto.parcelaNumero} de ${gasto.parcelaTotal}'
+                          : gasto.recorrenciaAtiva
+                          ? 'Repete todo mês'
+                          : 'Repetição encerrada',
+                      style: const TextStyle(
+                        fontSize: 11,
+                        fontWeight: FontWeight.w600,
+                        color: FinanceColors.ink,
+                      ),
+                    ),
+                  ],
                 ],
               ),
             ),
@@ -328,6 +354,10 @@ class ExpenseRow extends StatelessWidget {
                   onPay();
                 } else if (action == 'edit') {
                   onEdit();
+                } else if (action == 'installments') {
+                  onInstallments?.call();
+                } else if (action == 'stop') {
+                  onStopRecurring?.call();
                 } else {
                   onDelete();
                 }
@@ -343,6 +373,16 @@ class ExpenseRow extends StatelessWidget {
                   value: 'edit',
                   child: Text('Editar lançamento'),
                 ),
+                if (onInstallments != null)
+                  const PopupMenuItem(
+                    value: 'installments',
+                    child: Text('Ver parcelamento'),
+                  ),
+                if (onStopRecurring != null)
+                  const PopupMenuItem(
+                    value: 'stop',
+                    child: Text('Encerrar repetição'),
+                  ),
                 const PopupMenuItem(
                   value: 'delete',
                   child: Text(

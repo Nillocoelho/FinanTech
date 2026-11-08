@@ -1,5 +1,7 @@
 import 'package:finantech/data/gastos_repository.dart';
 import 'package:finantech/models/gasto.dart';
+import 'package:finantech/models/recurring_expense.dart';
+import 'package:finantech/utils/installment_helper.dart';
 
 final fixtureNow = DateTime(2026, 11, 7, 10);
 
@@ -31,6 +33,78 @@ class PreviewRepository extends GastosRepository {
   }
   final bool fail;
   final List<Gasto> expenses = [];
+  final List<RecurringExpense> rules = [];
+  @override
+  Future<void> prepararMes(int mes, int ano, {DateTime? now}) async {}
+  @override
+  Future<Map<DateTime, double>> getCompromissosFuturos(int mes, int ano) async {
+    final start = monthIndex(ano, mes) + 1;
+    return {
+      for (var i = 0; i < 3; i++)
+        monthAt(start + i): expenses
+            .where(
+              (g) =>
+                  !g.pago &&
+                  (g.parcelado || g.recorrenciaId != null) &&
+                  monthIndex(g.ano, g.mes) == start + i,
+            )
+            .fold<double>(0, (sum, g) => sum + g.valor),
+    };
+  }
+
+  @override
+  Future<List<Gasto>> getParcelas(String grupo) async =>
+      expenses.where((g) => g.parcelaGrupo == grupo).toList();
+  @override
+  Future<void> criarParcelamento(Gasto base, int quantidade) async {
+    final group = 'plan-${expenses.length}';
+    final parts = InstallmentHelper.splitAmount(base.valor, quantidade);
+    for (var i = 0; i < quantidade; i++) {
+      final period = InstallmentHelper.addMonths(base.mes, base.ano, i);
+      final date = base.vencimento!;
+      final last = DateTime(date.year, date.month + i + 1, 0).day;
+      expenses.add(
+        base.copyWith(
+          id: expenses.length + 1,
+          mes: period.mes,
+          ano: period.ano,
+          valor: parts[i],
+          parcelaGrupo: group,
+          parcelaNumero: i + 1,
+          parcelaTotal: quantidade,
+          vencimento: DateTime(
+            date.year,
+            date.month + i,
+            date.day.clamp(1, last),
+          ),
+        ),
+      );
+    }
+  }
+
+  @override
+  Future<void> criarRecorrencia(Gasto base, {DateTime? now}) async {
+    final start = monthIndex(base.ano, base.mes);
+    final rule = RecurringExpense(
+      id: 'rule-${rules.length}',
+      origem: base.origem,
+      valor: base.valor,
+      categoria: base.categoria,
+      inicioMes: start,
+      proximoMes: start + 12,
+      diaVencimento: base.vencimento!.day,
+      deslocamentoVencimento: 0,
+    );
+    rules.add(rule);
+    for (var i = 0; i < 12; i++) {
+      expenses.add(
+        rule
+            .occurrence(start + i, now ?? fixtureNow)
+            .copyWith(id: expenses.length + 1),
+      );
+    }
+  }
+
   @override
   Future<List<Gasto>> getGastosDoMes(int mes, int ano) async {
     if (fail) throw StateError('offline fixture failure');

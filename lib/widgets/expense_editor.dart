@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 
 import '../models/gasto.dart';
+import '../models/expense_category.dart';
 import '../ui/finance_theme.dart';
 import '../ui/finance_widgets.dart';
 import '../utils/currency_helper.dart';
@@ -12,11 +13,15 @@ class ExpenseDraft {
     required this.amount,
     required this.due,
     required this.installments,
+    this.category = ExpenseCategory.uncategorized,
+    this.recurring = false,
   });
   final String name;
   final double amount;
   final DateTime due;
   final int installments;
+  final String category;
+  final bool recurring;
 }
 
 class ExpenseEditor extends StatefulWidget {
@@ -25,10 +30,12 @@ class ExpenseEditor extends StatefulWidget {
     required this.period,
     required this.origins,
     this.expense,
+    this.seriesEdit = false,
   });
   final DateTime period;
   final List<String> origins;
   final Gasto? expense;
+  final bool seriesEdit;
   @override
   State<ExpenseEditor> createState() => _ExpenseEditorState();
 }
@@ -39,6 +46,8 @@ class _ExpenseEditorState extends State<ExpenseEditor> {
   final _count = TextEditingController(text: '2');
   DateTime? _due;
   bool _installments = false;
+  bool _recurring = false;
+  String _category = ExpenseCategory.uncategorized;
   @override
   void initState() {
     super.initState();
@@ -49,6 +58,7 @@ class _ExpenseEditorState extends State<ExpenseEditor> {
           : CurrencyHelper.formatToCurrency(widget.expense!.valor),
     );
     _due = widget.expense?.vencimento;
+    _category = widget.expense?.categoria ?? ExpenseCategory.uncategorized;
   }
 
   @override
@@ -122,11 +132,31 @@ class _ExpenseEditorState extends State<ExpenseEditor> {
                 style: TextStyle(color: FinanceColors.muted, height: 1.5),
               ),
               const SizedBox(height: 24),
+              if (widget.expense?.parcelado == true)
+                Padding(
+                  padding: const EdgeInsets.only(bottom: 16),
+                  child: Text(
+                    'Parcela ${widget.expense!.parcelaNumero} de ${widget.expense!.parcelaTotal}. A edição afeta somente esta parcela.',
+                    style: const TextStyle(color: FinanceColors.muted),
+                  ),
+                ),
+              if (widget.expense?.recorrenciaId != null)
+                Padding(
+                  padding: const EdgeInsets.only(bottom: 16),
+                  child: Text(
+                    widget.seriesEdit
+                        ? 'Aplica a este e aos próximos lançamentos em aberto. Pagamentos já registrados serão mantidos.'
+                        : 'A edição afeta somente este mês.',
+                    style: const TextStyle(color: FinanceColors.muted),
+                  ),
+                ),
               TextFormField(
                 controller: _amount,
                 autofocus: false,
-                decoration: const InputDecoration(
-                  labelText: 'Valor total',
+                decoration: InputDecoration(
+                  labelText: widget.expense?.parcelado == true
+                      ? 'Valor desta parcela'
+                      : 'Valor total',
                   prefixText: 'R\$ ',
                 ),
                 style: const TextStyle(
@@ -165,6 +195,16 @@ class _ExpenseEditorState extends State<ExpenseEditor> {
                 validator: (v) => v == null || v.trim().isEmpty
                     ? 'Informe o nome da conta.'
                     : null,
+              ),
+              const SizedBox(height: 16),
+              DropdownButtonFormField<String>(
+                initialValue: _category,
+                decoration: const InputDecoration(labelText: 'Categoria'),
+                isExpanded: true,
+                items: {...ExpenseCategory.values, _category}
+                    .map((c) => DropdownMenuItem(value: c, child: Text(c)))
+                    .toList(),
+                onChanged: (value) => setState(() => _category = value!),
               ),
               const SizedBox(height: 16),
               FormField<DateTime>(
@@ -224,7 +264,10 @@ class _ExpenseEditorState extends State<ExpenseEditor> {
                     style: TextStyle(fontSize: 12),
                   ),
                   value: _installments,
-                  onChanged: (value) => setState(() => _installments = value),
+                  onChanged: (value) => setState(() {
+                    _installments = value;
+                    if (value) _recurring = false;
+                  }),
                 ),
                 if (_installments) ...[
                   const SizedBox(height: 8),
@@ -256,13 +299,41 @@ class _ExpenseEditorState extends State<ExpenseEditor> {
                       ),
                     ),
                 ],
+                SwitchListTile(
+                  contentPadding: EdgeInsets.zero,
+                  title: const Text(
+                    'Repetir todo mês',
+                    style: TextStyle(fontSize: 15, fontWeight: FontWeight.w600),
+                  ),
+                  subtitle: const Text(
+                    'Para aluguel, assinaturas e contas fixas',
+                    style: TextStyle(fontSize: 12),
+                  ),
+                  value: _recurring,
+                  onChanged: (value) => setState(() {
+                    _recurring = value;
+                    if (value) _installments = false;
+                  }),
+                ),
+                if (_recurring)
+                  const Padding(
+                    padding: EdgeInsets.only(top: 8),
+                    child: Text(
+                      'O valor se repete mensalmente a partir do mês selecionado. O app mantém 12 meses previstos e atualiza a previsão ao abrir. Você pode encerrar a repetição pelo menu da conta.',
+                      style: TextStyle(
+                        fontSize: 12,
+                        height: 1.5,
+                        color: FinanceColors.muted,
+                      ),
+                    ),
+                  ),
               ],
               const SizedBox(height: 20),
-              if (widget.expense == null)
+              if (widget.expense == null && !_installments && !_recurring)
                 const Padding(
                   padding: EdgeInsets.only(bottom: 16),
                   child: Text(
-                    'Contas com o mesmo nome no mesmo mês terão os valores somados.',
+                    'Lançamentos avulsos do mesmo nome e categoria no mês terão os valores somados.',
                     style: TextStyle(
                       fontSize: 12,
                       height: 1.5,
@@ -277,6 +348,8 @@ class _ExpenseEditorState extends State<ExpenseEditor> {
                       context,
                       ExpenseDraft(
                         name: _name.text.trim(),
+                        category: _category,
+                        recurring: _recurring,
                         amount: CurrencyHelper.parseFromCurrency(_amount.text),
                         due: _due!,
                         installments: _installments

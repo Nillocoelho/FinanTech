@@ -1,41 +1,60 @@
 /// Modelo que representa um gasto/dívida no sistema.
-/// 
+///
 /// Cada gasto possui uma origem (a quem se deve), um valor,
 /// um status de pagamento, e está associado a um mês/ano específico.
 class Gasto {
   /// Identificador único do gasto (auto-incrementado pelo SQLite)
   final int? id;
-  
+
   /// Origem da dívida (ex: "Santander", "Inter", "Pai")
   final String origem;
-  
+
   /// Valor da dívida em reais
   final double valor;
-  
+
   /// Indica se a dívida foi paga (true = paga, false = em aberto)
   final bool pago;
-  
+
   /// Mês do gasto (1 a 12)
   final int mes;
-  
+
   /// Ano do gasto (ex: 2025)
   final int ano;
-  
+
   /// Data de criação no formato ISO8601 para ordenação
   final String createdAt;
 
   final DateTime? vencimento;
+  final String categoria;
+  final String? parcelaGrupo;
+  final int? parcelaNumero;
+  final int? parcelaTotal;
+  final String? recorrenciaId;
+
+  /// Joined from the recurring rule; not persisted in the expense row.
+  final bool recorrenciaAtiva;
+
+  bool get parcelado => parcelaGrupo != null;
 
   bool vencidoEm(DateTime agora) {
     final data = vencimento;
     if (pago || data == null) return false;
-    return DateTime(data.year, data.month, data.day)
-        .isBefore(DateTime(agora.year, agora.month, agora.day));
+    return DateTime(
+      data.year,
+      data.month,
+      data.day,
+    ).isBefore(DateTime(agora.year, agora.month, agora.day));
   }
 
   Gasto({
     this.id,
     this.vencimento,
+    this.categoria = 'Sem categoria',
+    this.parcelaGrupo,
+    this.parcelaNumero,
+    this.parcelaTotal,
+    this.recorrenciaId,
+    this.recorrenciaAtiva = true,
     required this.origem,
     required this.valor,
     required this.pago,
@@ -45,11 +64,17 @@ class Gasto {
   });
 
   /// Cria uma instância de [Gasto] a partir de um Map (vindo do SQLite)
-  /// 
+  ///
   /// O campo 'pago' no SQLite é INTEGER (0 ou 1), então convertemos para bool.
   factory Gasto.fromMap(Map<String, dynamic> map) {
     return Gasto(
       id: map['id'] as int?,
+      categoria: map['categoria'] as String? ?? 'Sem categoria',
+      parcelaGrupo: map['parcelaGrupo'] as String?,
+      parcelaNumero: map['parcelaNumero'] as int?,
+      parcelaTotal: map['parcelaTotal'] as int?,
+      recorrenciaId: map['recorrenciaId'] as String?,
+      recorrenciaAtiva: map['recorrenciaAtiva'] != 0,
       vencimento: DateTime.tryParse(map['vencimento'] as String? ?? ''),
       origem: map['origem'] as String,
       valor: (map['valor'] as num).toDouble(),
@@ -61,7 +86,7 @@ class Gasto {
   }
 
   /// Converte a instância de [Gasto] para um Map (para salvar no SQLite)
-  /// 
+  ///
   /// O campo 'pago' é convertido de bool para INTEGER (0 ou 1).
   Map<String, dynamic> toMap() {
     return {
@@ -73,11 +98,16 @@ class Gasto {
       'ano': ano,
       'createdAt': createdAt,
       'vencimento': vencimento?.toIso8601String(),
+      'categoria': categoria,
+      'parcelaGrupo': parcelaGrupo,
+      'parcelaNumero': parcelaNumero,
+      'parcelaTotal': parcelaTotal,
+      'recorrenciaId': recorrenciaId,
     };
   }
 
   /// Cria uma cópia do [Gasto] com campos alterados
-  /// 
+  ///
   /// Útil para atualizar o status de pagamento sem criar um novo objeto do zero.
   Gasto copyWith({
     int? id,
@@ -88,9 +118,21 @@ class Gasto {
     int? ano,
     String? createdAt,
     DateTime? vencimento,
+    String? categoria,
+    String? parcelaGrupo,
+    int? parcelaNumero,
+    int? parcelaTotal,
+    String? recorrenciaId,
+    bool? recorrenciaAtiva,
   }) {
     return Gasto(
       id: id ?? this.id,
+      categoria: categoria ?? this.categoria,
+      parcelaGrupo: parcelaGrupo ?? this.parcelaGrupo,
+      parcelaNumero: parcelaNumero ?? this.parcelaNumero,
+      parcelaTotal: parcelaTotal ?? this.parcelaTotal,
+      recorrenciaId: recorrenciaId ?? this.recorrenciaId,
+      recorrenciaAtiva: recorrenciaAtiva ?? this.recorrenciaAtiva,
       vencimento: vencimento ?? this.vencimento,
       origem: origem ?? this.origem,
       valor: valor ?? this.valor,

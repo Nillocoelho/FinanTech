@@ -91,7 +91,10 @@ class _ConfiguracoesPageState extends State<ConfiguracoesPage> {
         path = result.isEmpty ? null : result.single.path;
       }
       if (path == null) return;
-      final gastos = BackupService.decode(await File(path).readAsString());
+      final document = BackupService.decodeDocument(
+        await File(path).readAsString(),
+      );
+      final gastos = document.gastos;
       if (!mounted) return;
       final confirmado = await showDialog<bool>(
         context: context,
@@ -113,7 +116,10 @@ class _ConfiguracoesPageState extends State<ConfiguracoesPage> {
         ),
       );
       if (confirmado != true) return;
-      await _backupService.restaurar(gastos);
+      await _backupService.restaurar(
+        gastos,
+        recorrencias: document.recorrencias,
+      );
       await _carregarConfiguracoes();
       _mensagemBackup(
         '${gastos.length} gastos restaurados. Lembretes atualizados.',
