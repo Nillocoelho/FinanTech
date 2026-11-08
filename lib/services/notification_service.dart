@@ -7,7 +7,7 @@ import 'package:timezone/data/latest.dart' as tz_data;
 import 'package:shared_preferences/shared_preferences.dart';
 
 /// Serviço responsável por gerenciar notificações locais do aplicativo.
-/// 
+///
 /// Agenda avisos na véspera do vencimento dos gastos em aberto.
 class NotificationService {
   // Instância singleton
@@ -33,14 +33,14 @@ class NotificationService {
   // Canal de notificação Android
   static const String _channelId = 'finantech_due_reminders_v2';
   static const String _channelName = 'Lembretes Financeiros';
-  static const String _channelDescription = 
+  static const String _channelDescription =
       'Avisos um dia antes do vencimento das contas';
 
   /// Inicializa o serviço de notificações.
-  /// 
+  ///
   /// Deve ser chamado no início do app (main.dart) antes de usar
   /// qualquer outro método deste serviço.
-  /// 
+  ///
   /// Configura:
   /// - Timezone local para agendamentos
   /// - Plugin de notificações com configurações Android/iOS
@@ -51,7 +51,9 @@ class NotificationService {
       tz_data.initializeTimeZones();
 
       // Configuração para Android
-      const androidSettings = AndroidInitializationSettings('@mipmap/ic_launcher');
+      const androidSettings = AndroidInitializationSettings(
+        '@mipmap/ic_launcher',
+      );
 
       // Configuração para iOS (opcional, mas bom ter)
       const iosSettings = DarwinInitializationSettings(
@@ -68,7 +70,7 @@ class NotificationService {
 
       // Inicializa o plugin
       await _notificationsPlugin.initialize(
-        initSettings,
+        settings: initSettings,
         onDidReceiveNotificationResponse: _onNotificationTapped,
       );
 
@@ -84,7 +86,7 @@ class NotificationService {
   }
 
   /// Callback executado quando o usuário toca na notificação.
-  /// 
+  ///
   /// Pode ser usado para navegar para uma tela específica.
   void _onNotificationTapped(NotificationResponse response) {
     // Por enquanto, apenas abre o app (comportamento padrão)
@@ -92,16 +94,20 @@ class NotificationService {
   }
 
   /// Solicita permissão de notificação ao usuário (Android 13+).
-  /// 
+  ///
   /// Em versões anteriores do Android, a permissão é concedida automaticamente.
   Future<void> _requestNotificationPermission() async {
     final androidPlugin = _notificationsPlugin
-        .resolvePlatformSpecificImplementation<AndroidFlutterLocalNotificationsPlugin>();
-    
+        .resolvePlatformSpecificImplementation<
+          AndroidFlutterLocalNotificationsPlugin
+        >();
+
     if (androidPlugin != null) {
       final granted = await androidPlugin.requestNotificationsPermission();
       if (granted == false) {
-        throw StateError('Ative as notifica\u00e7\u00f5es do FinanTech nas configura\u00e7\u00f5es do celular.');
+        throw StateError(
+          'Ative as notifica\u00e7\u00f5es do FinanTech nas configura\u00e7\u00f5es do celular.',
+        );
       }
     }
   }
@@ -123,42 +129,65 @@ class NotificationService {
     await _notificationsPlugin.cancelAll();
     if (!await isReminderEnabled()) return;
     final db = await DatabaseHelper().database;
-    final rows = await db.query(DatabaseHelper.tableGastos,
-        where: 'pago = 0 AND vencimento IS NOT NULL');
+    final rows = await db.query(
+      DatabaseHelper.tableGastos,
+      where: 'pago = 0 AND vencimento IS NOT NULL',
+    );
     final hour = await getReminderHour();
     final minute = await getReminderMinute();
     final now = DateTime.now();
-    final upcoming = rows.map(Gasto.fromMap).where((g) =>
-      reminderDate(g.vencimento!, hour, minute).isAfter(now)).toList()
-      ..sort((a, b) => a.vencimento!.compareTo(b.vencimento!));
-    for (final gasto in (defaultTargetPlatform == TargetPlatform.iOS ? upcoming.take(60) : upcoming)) {
+    final upcoming =
+        rows
+            .map(Gasto.fromMap)
+            .where(
+              (g) => reminderDate(g.vencimento!, hour, minute).isAfter(now),
+            )
+            .toList()
+          ..sort((a, b) => a.vencimento!.compareTo(b.vencimento!));
+    for (final gasto
+        in (defaultTargetPlatform == TargetPlatform.iOS
+            ? upcoming.take(60)
+            : upcoming)) {
       final date = reminderDate(gasto.vencimento!, hour, minute);
       await _notificationsPlugin.zonedSchedule(
-        gasto.id! + 100,
-        'Conta vence amanhã',
-        '${gasto.origem}: R\$ ${gasto.valor.toStringAsFixed(2).replaceAll('.', ',')}. Vence amanhã.',
+        id: gasto.id! + 100,
+        title: 'Conta vence amanhã',
+        body:
+            '${gasto.origem}: R\$ ${gasto.valor.toStringAsFixed(2).replaceAll('.', ',')}. Vence amanhã.',
         // DateTime usa o fuso do celular, convertido para um instante UTC.
-        tz.TZDateTime.from(date, tz.UTC),
-        const NotificationDetails(
-          android: AndroidNotificationDetails(_channelId, _channelName,
+        scheduledDate: tz.TZDateTime.from(date, tz.UTC),
+        notificationDetails: const NotificationDetails(
+          android: AndroidNotificationDetails(
+            _channelId,
+            _channelName,
             channelDescription: 'Avisos um dia antes do vencimento das contas',
-            importance: Importance.high, priority: Priority.high,
-            playSound: true, enableVibration: true),
-          iOS: DarwinNotificationDetails(presentAlert: true, presentSound: true, presentBadge: true)),
+            importance: Importance.high,
+            priority: Priority.high,
+            playSound: true,
+            enableVibration: true,
+          ),
+          iOS: DarwinNotificationDetails(
+            presentAlert: true,
+            presentSound: true,
+            presentBadge: true,
+          ),
+        ),
         androidScheduleMode: AndroidScheduleMode.inexactAllowWhileIdle,
-        uiLocalNotificationDateInterpretation: UILocalNotificationDateInterpretation.absoluteTime,
       );
     }
   }
 
   /// Atualiza os avisos sem comprometer a gravação dos gastos.
   Future<void> refreshAfterChange() async {
-    try { await syncExpenseReminders(); }
-    catch (error) { debugPrint('Erro ao atualizar lembretes: $error'); }
+    try {
+      await syncExpenseReminders();
+    } catch (error) {
+      debugPrint('Erro ao atualizar lembretes: $error');
+    }
   }
 
   /// Cancela o lembrete mensal agendado.
-  /// 
+  ///
   /// Remove qualquer notificação pendente com o ID do lembrete mensal.
   Future<void> cancelMonthlyReminder() async {
     await _notificationsPlugin.cancelAll();
@@ -166,7 +195,7 @@ class NotificationService {
   }
 
   /// Verifica se o lembrete mensal está ativo.
-  /// 
+  ///
   /// Lê a preferência salva no SharedPreferences.
   /// Retorna true por padrão se nunca foi configurado.
   Future<bool> isReminderEnabled() async {
@@ -222,7 +251,7 @@ class NotificationService {
     await setReminderDay(day);
     await setReminderHour(hour);
     await setReminderMinute(minute);
-    
+
     // Se o lembrete está ativo, reagenda com as novas configurações
     final isEnabled = await isReminderEnabled();
     if (isEnabled) {
@@ -231,7 +260,7 @@ class NotificationService {
   }
 
   /// Alterna o estado do lembrete mensal.
-  /// 
+  ///
   /// Se [enabled] for true, agenda o lembrete.
   /// Se [enabled] for false, cancela o lembrete.
   Future<void> toggleReminder(bool enabled) async {
@@ -243,7 +272,7 @@ class NotificationService {
   }
 
   /// Envia uma notificação de teste imediata.
-  /// 
+  ///
   /// Útil para verificar se as notificações estão funcionando.
   /// Não afeta o lembrete mensal agendado.
   Future<void> showTestNotification() async {
@@ -258,13 +287,16 @@ class NotificationService {
       enableVibration: true,
     );
 
-    const notificationDetails = NotificationDetails(android: androidDetails, iOS: DarwinNotificationDetails(presentAlert: true, presentSound: true));
+    const notificationDetails = NotificationDetails(
+      android: androidDetails,
+      iOS: DarwinNotificationDetails(presentAlert: true, presentSound: true),
+    );
 
     await _notificationsPlugin.show(
-      0, // ID diferente do lembrete mensal
-      'Teste de notificação',
-      'As notificações estão funcionando corretamente!',
-      notificationDetails,
+      id: 0, // ID reservado para o teste
+      title: 'Teste de notificação',
+      body: 'As notificações estão funcionando corretamente!',
+      notificationDetails: notificationDetails,
     );
   }
 }

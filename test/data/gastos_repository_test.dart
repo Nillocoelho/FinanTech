@@ -1,6 +1,5 @@
 import 'package:flutter_test/flutter_test.dart';
 import 'package:sqflite_common_ffi/sqflite_ffi.dart';
-import 'package:sqflite/sqflite.dart';
 import 'package:finantech/data/gastos_repository.dart';
 import 'package:finantech/data/database_helper.dart';
 import 'package:finantech/models/gasto.dart';
@@ -22,8 +21,10 @@ void main() {
       await db.delete(DatabaseHelper.tableGastos);
     });
 
-    test('existeGastoComOrigem deve retornar false quando não existe', () async {
-      final existe = await repository.existeGastoComOrigem('Santander', 12, 2025);
+    test('existeGastoComOrigem deve retornar false quando não existe',
+        () async {
+      final existe =
+          await repository.existeGastoComOrigem('Santander', 12, 2025);
       expect(existe, false);
     });
 
@@ -40,7 +41,8 @@ void main() {
       await repository.insertGasto(gasto);
 
       // Verifica se existe
-      final existe = await repository.existeGastoComOrigem('Santander', 12, 2025);
+      final existe =
+          await repository.existeGastoComOrigem('Santander', 12, 2025);
       expect(existe, true);
     });
 
@@ -56,13 +58,18 @@ void main() {
       await repository.insertGasto(gasto);
 
       // Verifica com diferentes cases
-      expect(await repository.existeGastoComOrigem('santander', 12, 2025), true);
-      expect(await repository.existeGastoComOrigem('Santander', 12, 2025), true);
-      expect(await repository.existeGastoComOrigem('SANTANDER', 12, 2025), true);
-      expect(await repository.existeGastoComOrigem('SaNtAnDeR', 12, 2025), true);
+      expect(
+          await repository.existeGastoComOrigem('santander', 12, 2025), true);
+      expect(
+          await repository.existeGastoComOrigem('Santander', 12, 2025), true);
+      expect(
+          await repository.existeGastoComOrigem('SANTANDER', 12, 2025), true);
+      expect(
+          await repository.existeGastoComOrigem('SaNtAnDeR', 12, 2025), true);
     });
 
-    test('existeGastoComOrigem não deve encontrar em mês/ano diferente', () async {
+    test('existeGastoComOrigem não deve encontrar em mês/ano diferente',
+        () async {
       final gasto = Gasto(
         origem: 'Santander',
         valor: 100.0,
@@ -74,9 +81,12 @@ void main() {
       await repository.insertGasto(gasto);
 
       // Verifica em outros períodos
-      expect(await repository.existeGastoComOrigem('Santander', 11, 2025), false);
-      expect(await repository.existeGastoComOrigem('Santander', 12, 2024), false);
-      expect(await repository.existeGastoComOrigem('Santander', 1, 2026), false);
+      expect(
+          await repository.existeGastoComOrigem('Santander', 11, 2025), false);
+      expect(
+          await repository.existeGastoComOrigem('Santander', 12, 2024), false);
+      expect(
+          await repository.existeGastoComOrigem('Santander', 1, 2026), false);
     });
 
     test('existeGastoComOrigem deve excluir um ID específico', () async {
@@ -91,17 +101,18 @@ void main() {
       final id = await repository.insertGasto(gasto);
 
       // Verifica excluindo o próprio ID (útil para edição)
-      final existeExcluindoId = await repository.existeGastoComOrigem(
-        'Santander', 12, 2025, excludeId: id);
+      final existeExcluindoId = await repository
+          .existeGastoComOrigem('Santander', 12, 2025, excludeId: id);
       expect(existeExcluindoId, false);
 
       // Verifica sem excluir
-      final existeSemExcluir = await repository.existeGastoComOrigem(
-        'Santander', 12, 2025);
+      final existeSemExcluir =
+          await repository.existeGastoComOrigem('Santander', 12, 2025);
       expect(existeSemExcluir, true);
     });
 
-    test('existeGastoComOrigem com excludeId deve encontrar outros registros', () async {
+    test('existeGastoComOrigem com excludeId deve encontrar outros registros',
+        () async {
       // Insere dois gastos
       final gasto1 = Gasto(
         origem: 'Santander',
@@ -124,8 +135,8 @@ void main() {
       await repository.insertGasto(gasto2);
 
       // Verifica excluindo apenas o primeiro ID - deve encontrar o segundo
-      final existe = await repository.existeGastoComOrigem(
-        'Santander', 12, 2025, excludeId: id1);
+      final existe = await repository
+          .existeGastoComOrigem('Santander', 12, 2025, excludeId: id1);
       expect(existe, true);
     });
 
@@ -141,7 +152,8 @@ void main() {
       await repository.insertGasto(gasto);
 
       // Verifica com espaços extras (devem ser tratados)
-      final existe = await repository.existeGastoComOrigem('  Santander  ', 12, 2025);
+      final existe =
+          await repository.existeGastoComOrigem('  Santander  ', 12, 2025);
       // O método faz trim(), então deve encontrar
       expect(existe, true);
     });
@@ -281,7 +293,8 @@ void main() {
       expect(origens, containsAll(['Inter', 'Santander']));
     });
 
-    test('getGastoComOrigem deve retornar o gasto existente do mês/ano', () async {
+    test('getGastoComOrigem deve retornar o gasto existente do mês/ano',
+        () async {
       await repository.insertGasto(Gasto(
         origem: 'Santander',
         valor: 100.0,
@@ -297,7 +310,8 @@ void main() {
       expect(gasto.valor, 100.0);
     });
 
-    test('salvarSomandoSeExistir deve inserir quando não houver duplicado', () async {
+    test('salvarSomandoSeExistir deve inserir quando não houver duplicado',
+        () async {
       final resultado = await repository.salvarSomandoSeExistir(Gasto(
         origem: 'Nubank',
         valor: 250.0,
@@ -313,7 +327,8 @@ void main() {
       expect(gastos.first.valor, 250.0);
     });
 
-    test('salvarSomandoSeExistir deve somar valor ao gasto existente', () async {
+    test('salvarSomandoSeExistir deve somar valor ao gasto existente',
+        () async {
       await repository.insertGasto(Gasto(
         origem: 'Santander',
         valor: 100.0,

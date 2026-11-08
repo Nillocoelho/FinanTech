@@ -36,7 +36,8 @@ Todos os dados ficam armazenados localmente no seu dispositivo usando SQLite, ga
 | 🔍 **Filtros Avançados** | Filtre por status (aberto/pago) e ordene por diferentes critérios |
 | 💵 **Máscara de Moeda** | Formatação automática em Real (R$) |
 | 📊 **Totalizador Inteligente** | Veja o resumo do mês com total geral e por status |
-| 🔔 **Notificações** | Lembretes mensais configuráveis para revisão de gastos |
+| 🔔 **Notificações** | Avisos na véspera do vencimento, com horário configurável |
+| **Backup completo** | Crie, compartilhe e restaure os gastos de todos os meses |
 | 🎨 **Tema Escuro** | Interface moderna e confortável para os olhos |
 | 📱 **100% Offline** | Funciona sem internet, dados salvos localmente |
 
@@ -101,7 +102,9 @@ lib/
 
 ### Pré-requisitos
 
-- Flutter SDK 3.0+
+- Flutter SDK 3.47+ e Dart 3.13+
+- Java 21, Android SDK Platform 37 e Build Tools 36.0.0
+- iOS 14+ para executar no iPhone
 - Android Studio ou VS Code com extensões Flutter/Dart
 - Emulador Android ou dispositivo físico
 
@@ -120,6 +123,17 @@ flutter pub get
 # Execute o app
 flutter run
 ```
+
+### Validar a atualização
+
+```bash
+flutter analyze
+flutter test
+flutter pub outdated
+```
+
+No Windows, ative o Modo de Desenvolvedor para permitir os links simbólicos usados pelos plugins Flutter.
+As dependências indiretas podem permanecer em versões fixadas pelo Flutter ou pelos próprios plugins; não use overrides para forçar versões incompatíveis.
 
 ### Gerar APK
 
