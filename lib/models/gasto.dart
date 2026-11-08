@@ -24,8 +24,18 @@ class Gasto {
   /// Data de criação no formato ISO8601 para ordenação
   final String createdAt;
 
+  final DateTime? vencimento;
+
+  bool vencidoEm(DateTime agora) {
+    final data = vencimento;
+    if (pago || data == null) return false;
+    return DateTime(data.year, data.month, data.day)
+        .isBefore(DateTime(agora.year, agora.month, agora.day));
+  }
+
   Gasto({
     this.id,
+    this.vencimento,
     required this.origem,
     required this.valor,
     required this.pago,
@@ -40,6 +50,7 @@ class Gasto {
   factory Gasto.fromMap(Map<String, dynamic> map) {
     return Gasto(
       id: map['id'] as int?,
+      vencimento: DateTime.tryParse(map['vencimento'] as String? ?? ''),
       origem: map['origem'] as String,
       valor: (map['valor'] as num).toDouble(),
       pago: (map['pago'] as int) == 1, // Converte 0/1 para false/true
@@ -61,6 +72,7 @@ class Gasto {
       'mes': mes,
       'ano': ano,
       'createdAt': createdAt,
+      'vencimento': vencimento?.toIso8601String(),
     };
   }
 
@@ -75,9 +87,11 @@ class Gasto {
     int? mes,
     int? ano,
     String? createdAt,
+    DateTime? vencimento,
   }) {
     return Gasto(
       id: id ?? this.id,
+      vencimento: vencimento ?? this.vencimento,
       origem: origem ?? this.origem,
       valor: valor ?? this.valor,
       pago: pago ?? this.pago,

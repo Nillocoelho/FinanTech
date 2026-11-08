@@ -159,6 +159,7 @@ class _GastosPageState extends State<GastosPage> {
     final parcelasController = TextEditingController(text: '2');
     final formKey = GlobalKey<FormState>();
     TipoLancamento tipo = TipoLancamento.direto;
+    DateTime? vencimento;
 
     final confirmado = await showGeneralDialog<bool>(
       context: context,
@@ -180,7 +181,9 @@ class _GastosPageState extends State<GastosPage> {
                 : const <double>[];
 
             return SafeArea(
-              child: Center(
+              child: Padding(
+                padding: EdgeInsets.only(bottom: MediaQuery.of(context).viewInsets.bottom),
+                child: Center(
                 child: Material(
                   color: Colors.transparent,
                   child: Stack(
@@ -336,6 +339,8 @@ class _GastosPageState extends State<GastosPage> {
                                       return null;
                                     },
                                   ),
+                                  const SizedBox(height: 16),
+                                  _campoVencimento(context, vencimento, (data) => setModalState(() => vencimento = data)),
                                   const SizedBox(height: 18),
                                   SegmentedButton<TipoLancamento>(
                                     segments: const [
@@ -494,6 +499,7 @@ class _GastosPageState extends State<GastosPage> {
                   ),
                 ),
               ),
+              ),
             );
           },
         );
@@ -540,6 +546,7 @@ class _GastosPageState extends State<GastosPage> {
       valor: valor,
       tipo: tipoSelecionado,
       quantidadeParcelas: quantidadeParcelas,
+      vencimento: vencimento,
     );
   }
 
@@ -548,6 +555,7 @@ class _GastosPageState extends State<GastosPage> {
     required double valor,
     required TipoLancamento tipo,
     required int quantidadeParcelas,
+    DateTime? vencimento,
   }) async {
     if (valor <= 0) {
       _mostrarErro('Por favor, insira um valor válido.');
@@ -575,6 +583,9 @@ class _GastosPageState extends State<GastosPage> {
         );
         final gasto = Gasto(
           origem: nome,
+          vencimento: vencimento == null ? null : DateTime(
+            vencimento.year, vencimento.month + index,
+            vencimento.day.clamp(1, DateTime(vencimento.year, vencimento.month + index + 1, 0).day).toInt()),
           valor: parcelas[index],
           pago: false,
           mes: periodo.mes,
@@ -663,7 +674,30 @@ class _GastosPageState extends State<GastosPage> {
     }
   }
 
+  Widget _campoVencimento(BuildContext ctx, DateTime? data, ValueChanged<DateTime> onChanged) {
+    return FormField<DateTime>(
+      validator: (_) => data == null ? 'Informe o vencimento' : null,
+      builder: (field) => Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        ListTile(
+          contentPadding: EdgeInsets.zero,
+          leading: const Icon(Icons.event),
+          title: const Text('Vencimento'),
+          subtitle: Text(data == null ? 'Selecione a data' : DateFormat('dd/MM/yyyy').format(data)),
+          onTap: () async {
+            FocusScope.of(ctx).unfocus();
+            final selecionada = await showDatePicker(context: ctx,
+              initialDate: data ?? DateTime(_anoSelecionado, _mesSelecionado, 1),
+              firstDate: DateTime(2000), lastDate: DateTime(2100, 12, 31));
+            if (selecionada != null) { field.didChange(selecionada); onChanged(selecionada); }
+          },
+        ),
+        if (field.hasError) Text(field.errorText!, style: TextStyle(color: Theme.of(ctx).colorScheme.error)),
+      ]),
+    );
+  }
+
   Future<void> _editarGasto(Gasto gasto) async {
+    DateTime? vencimento = gasto.vencimento;
     final origemCtrl = TextEditingController(text: gasto.origem);
     final valorCtrl =
         TextEditingController(text: CurrencyHelper.formatToCurrency(gasto.valor));
@@ -671,7 +705,7 @@ class _GastosPageState extends State<GastosPage> {
     final resultado = await showModalBottomSheet<bool>(
       context: context,
       isScrollControlled: true,
-      builder: (ctx) => Padding(
+      builder: (ctx) => StatefulBuilder(builder: (ctx, setModalState) => SingleChildScrollView(child: Padding(
         padding: EdgeInsets.only(
             bottom: MediaQuery.of(ctx).viewInsets.bottom, left: 16, right: 16, top: 16),
         child: Form(
@@ -704,6 +738,7 @@ class _GastosPageState extends State<GastosPage> {
                   return null;
                 },
               ),
+              _campoVencimento(ctx, vencimento, (data) => setModalState(() => vencimento = data)),
               const SizedBox(height: 24),
               Row(children: [
                 Expanded(
@@ -722,7 +757,7 @@ class _GastosPageState extends State<GastosPage> {
             ],
           ),
         ),
-      ),
+      ))),
     );
     if (resultado == true) {
       try {
@@ -740,6 +775,7 @@ class _GastosPageState extends State<GastosPage> {
         }
         final gastoAtualizado = gasto.copyWith(
             origem: novaOrigem,
+            vencimento: vencimento,
             valor: CurrencyHelper.parseFromCurrency(valorCtrl.text));
         await _repository.updateGasto(gastoAtualizado);
         await _carregarDados();
@@ -888,11 +924,12 @@ class _GastosPageState extends State<GastosPage> {
   }
 
   /// Abre a tela de configurações
-  void _abrirConfiguracoes() {
-    Navigator.push(
+  Future<void> _abrirConfiguracoes() async {
+    await Navigator.push(
       context,
       MaterialPageRoute(builder: (context) => const ConfiguracoesPage()),
     );
+    if (mounted) await _carregarDados();
   }
 
   @override
@@ -1238,27 +1275,29 @@ class _GastosPageState extends State<GastosPage> {
 
   Widget _buildGastoCard(Gasto gasto) {
     final isPago = gasto.pago;
+    final vencido = gasto.vencidoEm(DateTime.now());
+    final corStatus = isPago ? Colors.green : vencido ? Colors.red : Colors.orange;
     return Card(
       margin: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
       color: isPago
           ? Theme.of(context).colorScheme.surfaceContainerHighest.withOpacity(0.5)
-          : null,
+          : vencido ? Theme.of(context).colorScheme.errorContainer.withOpacity(0.35) : null,
       child: InkWell(
         onLongPress: () => _editarGasto(gasto),
         borderRadius: BorderRadius.circular(12),
         child: ListTile(
           leading: CircleAvatar(
             backgroundColor:
-                isPago ? Colors.green.withOpacity(0.2) : Colors.orange.withOpacity(0.2),
-            child: Icon(isPago ? Icons.paid_outlined : Icons.receipt_long_outlined,
-                color: isPago ? Colors.green : Colors.orange),
+                corStatus.withOpacity(0.2),
+            child: Icon(isPago ? Icons.paid_outlined : vencido ? Icons.warning_amber_rounded : Icons.receipt_long_outlined,
+                color: corStatus),
           ),
           title: Text(gasto.origem,
               style: TextStyle(
                   fontWeight: FontWeight.w600,
                   decoration: isPago ? TextDecoration.lineThrough : null,
                   color: isPago ? Colors.grey : null)),
-          subtitle: Text(_currencyFormat.format(gasto.valor),
+          subtitle: Text('${_currencyFormat.format(gasto.valor)}${gasto.vencimento == null ? '' : '\n${vencido ? 'Vencido desde' : isPago ? 'Vencimento' : 'Vence em'} ${DateFormat('dd/MM/yyyy').format(gasto.vencimento!)}'}',
               style: TextStyle(
                   fontSize: 16,
                   fontWeight: isPago ? FontWeight.normal : FontWeight.bold,

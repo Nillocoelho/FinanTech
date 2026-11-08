@@ -4,6 +4,7 @@ import 'package:file_picker/file_picker.dart';
 import 'package:share_plus/share_plus.dart';
 import '../services/notification_service.dart';
 import '../services/csv_service.dart';
+import '../services/backup_service.dart';
 
 /// Tela de configurações do aplicativo.
 /// 
@@ -20,6 +21,75 @@ class ConfiguracoesPage extends StatefulWidget {
 class _ConfiguracoesPageState extends State<ConfiguracoesPage> {
   final NotificationService _notificationService = NotificationService();
   final CsvService _csvService = CsvService();
+  final BackupService _backupService = BackupService();
+  bool _backupBusy = false;
+
+  void _mensagemBackup(String mensagem) {
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(mensagem)));
+  }
+
+  Future<void> _criarBackup() async {
+    setState(() => _backupBusy = true);
+    try {
+      final path = await _backupService.criarBackup();
+      if (!mounted) return;
+      _mensagemBackup('Backup salvo neste aparelho. Compartilhe para guardar uma cópia fora dele.');
+      final box = context.findRenderObject() as RenderBox?;
+      await Share.shareXFiles([XFile(path)],
+          text: 'Backup completo dos gastos FinanTech',
+          sharePositionOrigin: box == null ? null : box.localToGlobal(Offset.zero) & box.size);
+    } catch (error) {
+      _mensagemBackup('Não foi possível concluir o backup: $error');
+    } finally {
+      if (mounted) setState(() => _backupBusy = false);
+    }
+  }
+
+  Future<void> _restaurarBackup({bool local = false}) async {
+    setState(() => _backupBusy = true);
+    try {
+      String? path;
+      if (local) {
+        final files = await _backupService.listarBackupsLocais();
+        if (!mounted) return;
+        if (files.isEmpty) {
+          _mensagemBackup('Nenhum backup salvo neste aparelho.');
+          return;
+        }
+        path = await showDialog<String>(context: context, builder: (ctx) => SimpleDialog(
+          title: const Text('Backups neste aparelho'),
+          children: files.map((file) => SimpleDialogOption(
+            onPressed: () => Navigator.pop(ctx, file.path),
+            child: Text(file.path.split(Platform.pathSeparator).last),
+          )).toList(),
+        ));
+      } else {
+        final result = await FilePicker.platform.pickFiles(
+            type: FileType.custom, allowedExtensions: ['json']);
+        path = result?.files.single.path;
+      }
+      if (path == null) return;
+      final gastos = BackupService.decode(await File(path).readAsString());
+      if (!mounted) return;
+      final confirmado = await showDialog<bool>(context: context, builder: (ctx) => AlertDialog(
+        title: const Text('Restaurar backup?'),
+        content: Text('Os gastos atuais serão substituídos pelos ${gastos.length} gastos deste backup, de todos os meses. Uma cópia dos dados atuais será salva em “Backups neste aparelho”.'),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('Cancelar')),
+          FilledButton(onPressed: () => Navigator.pop(ctx, true), child: const Text('Restaurar')),
+        ],
+      ));
+      if (confirmado != true) return;
+      await _backupService.restaurar(gastos);
+      await _carregarConfiguracoes();
+      _mensagemBackup('${gastos.length} gastos restaurados. Lembretes atualizados.');
+    } catch (error) {
+      _mensagemBackup('Não foi possível restaurar o backup: $error');
+    } finally {
+      if (mounted) setState(() => _backupBusy = false);
+    }
+  }
   
   // Estado do switch de lembrete
   bool _lembreteAtivo = true;
@@ -43,6 +113,7 @@ class _ConfiguracoesPageState extends State<ConfiguracoesPage> {
     final hora = await _notificationService.getReminderHour();
     final minuto = await _notificationService.getReminderMinute();
     
+    if (!mounted) return;
     setState(() {
       _lembreteAtivo = isEnabled;
       _diaLembrete = dia;
@@ -63,8 +134,8 @@ class _ConfiguracoesPageState extends State<ConfiguracoesPage> {
         SnackBar(
           content: Text(
             value 
-              ? 'Lembrete ativado para dia $_diaLembrete às ${_horaLembrete.toString().padLeft(2, '0')}:${_minutoLembrete.toString().padLeft(2, '0')}'
-              : 'Lembrete mensal desativado.',
+              ? 'Lembretes ativados para a véspera às ${_horaLembrete.toString().padLeft(2, '0')}:${_minutoLembrete.toString().padLeft(2, '0')}'
+              : 'Lembretes desativados.',
           ),
           backgroundColor: value ? Colors.green : Colors.grey,
           behavior: SnackBarBehavior.floating,
@@ -75,73 +146,6 @@ class _ConfiguracoesPageState extends State<ConfiguracoesPage> {
   }
 
   /// Abre o seletor de dia do mês em formato de calendário
-  Future<void> _selecionarDia() async {
-    final dia = await showDialog<int>(
-      context: context,
-      builder: (context) => AlertDialog(
-        title: const Text('Selecione o dia'),
-        content: SizedBox(
-          width: 280,
-          child: GridView.builder(
-            shrinkWrap: true,
-            gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
-              crossAxisCount: 7,
-              mainAxisSpacing: 8,
-              crossAxisSpacing: 8,
-            ),
-            itemCount: 28,
-            itemBuilder: (context, index) {
-              final d = index + 1;
-              final isSelected = d == _diaLembrete;
-              return InkWell(
-                onTap: () => Navigator.pop(context, d),
-                borderRadius: BorderRadius.circular(20),
-                child: Container(
-                  decoration: BoxDecoration(
-                    color: isSelected 
-                        ? Theme.of(context).colorScheme.primary
-                        : Colors.transparent,
-                    borderRadius: BorderRadius.circular(20),
-                    border: Border.all(
-                      color: isSelected 
-                          ? Theme.of(context).colorScheme.primary
-                          : Theme.of(context).colorScheme.outline.withOpacity(0.3),
-                    ),
-                  ),
-                  alignment: Alignment.center,
-                  child: Text(
-                    '$d',
-                    style: TextStyle(
-                      fontWeight: isSelected ? FontWeight.bold : FontWeight.normal,
-                      color: isSelected 
-                          ? Theme.of(context).colorScheme.onPrimary
-                          : null,
-                    ),
-                  ),
-                ),
-              );
-            },
-          ),
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(context),
-            child: const Text('Cancelar'),
-          ),
-        ],
-      ),
-    );
-    
-    if (dia != null && dia != _diaLembrete) {
-      setState(() => _diaLembrete = dia);
-      await _notificationService.updateReminderSchedule(
-        _diaLembrete, _horaLembrete, _minutoLembrete
-      );
-      _mostrarSnackConfirmacao();
-    }
-  }
-
-  /// Abre o seletor de horário
   Future<void> _selecionarHorario() async {
     final horario = await showTimePicker(
       context: context,
@@ -171,7 +175,7 @@ class _ConfiguracoesPageState extends State<ConfiguracoesPage> {
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
           content: Text(
-            'Lembrete atualizado: dia $_diaLembrete às ${_horaLembrete.toString().padLeft(2, '0')}:${_minutoLembrete.toString().padLeft(2, '0')}',
+            'Lembrete atualizado: na véspera às ${_horaLembrete.toString().padLeft(2, '0')}:${_minutoLembrete.toString().padLeft(2, '0')}',
           ),
           backgroundColor: Colors.green,
           behavior: SnackBarBehavior.floating,
@@ -410,10 +414,10 @@ class _ConfiguracoesPageState extends State<ConfiguracoesPage> {
                 
                 // Switch do lembrete mensal
                 SwitchListTile(
-                  title: const Text('Lembrete mensal de contas'),
+                  title: const Text('Lembretes de vencimento'),
                   subtitle: Text(
                     _lembreteAtivo 
-                      ? 'Ativo: dia $_diaLembrete às $horarioFormatado'
+                      ? 'Na véspera do vencimento às $horarioFormatado'
                       : 'Desativado',
                   ),
                   value: _lembreteAtivo,
@@ -428,18 +432,6 @@ class _ConfiguracoesPageState extends State<ConfiguracoesPage> {
                   ),
                 ),
                 
-                // Configuração de dia
-                ListTile(
-                  enabled: _lembreteAtivo,
-                  leading: Icon(Icons.calendar_today,
-                    color: _lembreteAtivo ? null : Colors.grey),
-                  title: const Text('Dia do lembrete'),
-                  subtitle: Text('Dia $_diaLembrete de cada mês'),
-                  trailing: const Icon(Icons.chevron_right),
-                  onTap: _lembreteAtivo ? _selecionarDia : null,
-                ),
-                
-                // Configuração de horário
                 ListTile(
                   enabled: _lembreteAtivo,
                   leading: Icon(Icons.access_time,
@@ -463,6 +455,26 @@ class _ConfiguracoesPageState extends State<ConfiguracoesPage> {
                 
                 const Divider(height: 32),
                 
+                _buildSectionHeader('Backup completo dos gastos'),
+                if (_backupBusy) const LinearProgressIndicator(),
+                ListTile(
+                  leading: const Icon(Icons.backup_outlined),
+                  title: const Text('Criar e compartilhar backup'),
+                  subtitle: const Text('Todos os meses, valores, vencimentos e pagamentos'),
+                  onTap: _backupBusy ? null : _criarBackup,
+                ),
+                ListTile(
+                  leading: const Icon(Icons.restore),
+                  title: const Text('Restaurar de um arquivo'),
+                  subtitle: const Text('Selecionar um backup FinanTech (.json)'),
+                  onTap: _backupBusy ? null : () => _restaurarBackup(),
+                ),
+                ListTile(
+                  leading: const Icon(Icons.folder_copy_outlined),
+                  title: const Text('Backups neste aparelho'),
+                  subtitle: const Text('Recuperar uma cópia salva anteriormente'),
+                  onTap: _backupBusy ? null : () => _restaurarBackup(local: true),
+                ),
                 // Seção de Dados
                 _buildSectionHeader('Importação / Exportação'),
                 

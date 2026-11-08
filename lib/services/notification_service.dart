@@ -1,3 +1,6 @@
+import 'package:flutter/foundation.dart';
+import '../data/database_helper.dart';
+import '../models/gasto.dart';
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 import 'package:timezone/timezone.dart' as tz;
 import 'package:timezone/data/latest.dart' as tz_data;
@@ -5,8 +8,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 /// Serviço responsável por gerenciar notificações locais do aplicativo.
 /// 
-/// Este serviço permite agendar lembretes mensais para que o usuário
-/// revise seus gastos. O dia e horário são configuráveis pelo usuário.
+/// Agenda avisos na véspera do vencimento dos gastos em aberto.
 class NotificationService {
   // Instância singleton
   static final NotificationService _instance = NotificationService._internal();
@@ -16,9 +18,6 @@ class NotificationService {
   // Plugin de notificações locais
   final FlutterLocalNotificationsPlugin _notificationsPlugin =
       FlutterLocalNotificationsPlugin();
-
-  // ID único para o lembrete mensal (usado para cancelar/atualizar)
-  static const int _monthlyReminderId = 1;
 
   // Chaves para salvar preferências
   static const String _reminderEnabledKey = 'monthly_reminder_enabled';
@@ -32,10 +31,10 @@ class NotificationService {
   static const int defaultMinute = 0;
 
   // Canal de notificação Android
-  static const String _channelId = 'finantech_reminders';
+  static const String _channelId = 'finantech_due_reminders_v2';
   static const String _channelName = 'Lembretes Financeiros';
   static const String _channelDescription = 
-      'Notificações de lembrete para revisar gastos mensais';
+      'Avisos um dia antes do vencimento das contas';
 
   /// Inicializa o serviço de notificações.
   /// 
@@ -74,13 +73,9 @@ class NotificationService {
       );
 
       // Solicita permissão de notificação (Android 13+)
+      _initialized = true;
       await _requestNotificationPermission();
-
-      // Verifica se o lembrete está ativo e agenda se necessário
-      final isEnabled = await isReminderEnabled();
-      if (isEnabled) {
-        await scheduleMonthlyReminder();
-      }
+      await syncExpenseReminders();
     } catch (e) {
       // Ignora erros de inicialização - o app continua funcionando
       // ignore: avoid_print
@@ -104,120 +99,69 @@ class NotificationService {
         .resolvePlatformSpecificImplementation<AndroidFlutterLocalNotificationsPlugin>();
     
     if (androidPlugin != null) {
-      await androidPlugin.requestNotificationsPermission();
-    }
-  }
-
-  /// Agenda o lembrete mensal para o dia e horário configurados.
-  /// 
-  /// O lembrete é configurado para repetir todo mês no mesmo dia e horário.
-  /// Se a data atual já passou do dia configurado, agenda para o próximo mês.
-  Future<void> scheduleMonthlyReminder() async {
-    // Cancela qualquer lembrete anterior antes de agendar novo
-    await _notificationsPlugin.cancel(_monthlyReminderId);
-
-    // Obtém as configurações do usuário
-    final day = await getReminderDay();
-    final hour = await getReminderHour();
-    final minute = await getReminderMinute();
-
-    // Calcula a próxima data para o lembrete
-    final scheduledDate = _getNextReminderDate(day, hour, minute);
-
-    // Detalhes da notificação para Android
-    const androidDetails = AndroidNotificationDetails(
-      _channelId,
-      _channelName,
-      channelDescription: _channelDescription,
-      importance: Importance.high,
-      priority: Priority.high,
-      icon: '@mipmap/ic_launcher',
-      // Som padrão do sistema
-      playSound: true,
-      // Vibração padrão
-      enableVibration: true,
-    );
-
-    // Detalhes da notificação para iOS
-    const iosDetails = DarwinNotificationDetails(
-      presentAlert: true,
-      presentBadge: true,
-      presentSound: true,
-    );
-
-    // Detalhes combinados
-    const notificationDetails = NotificationDetails(
-      android: androidDetails,
-      iOS: iosDetails,
-    );
-
-    // Agenda a notificação mensal recorrente
-    await _notificationsPlugin.zonedSchedule(
-      _monthlyReminderId,
-      'Lembrete financeiro',
-      'Você tem gastos para revisar neste mês. Abra o app e confira.',
-      scheduledDate,
-      notificationDetails,
-      // Configuração para repetir mensalmente no dia e horário configurados
-      matchDateTimeComponents: DateTimeComponents.dayOfMonthAndTime,
-      androidScheduleMode: AndroidScheduleMode.inexactAllowWhileIdle,
-      uiLocalNotificationDateInterpretation:
-          UILocalNotificationDateInterpretation.absoluteTime,
-    );
-
-    // Salva preferência como ativa
-    await _setReminderEnabled(true);
-  }
-
-  /// Calcula a próxima data para o lembrete com dia e horário personalizados.
-  /// 
-  /// Se hoje já passou do dia/horário configurado, retorna o próximo mês.
-  /// Caso contrário, retorna o mês atual.
-  tz.TZDateTime _getNextReminderDate(int day, int hour, int minute) {
-    final now = tz.TZDateTime.now(tz.local);
-    
-    // Data alvo: dia e horário configurados do mês atual
-    var scheduledDate = tz.TZDateTime(
-      tz.local,
-      now.year,
-      now.month,
-      day,
-      hour,
-      minute,
-    );
-
-    // Se a data já passou, agenda para o próximo mês
-    if (scheduledDate.isBefore(now)) {
-      // Avança para o próximo mês
-      if (now.month == 12) {
-        scheduledDate = tz.TZDateTime(
-          tz.local,
-          now.year + 1,
-          1, // Janeiro
-          day,
-          hour,
-          minute,
-        );
-      } else {
-        scheduledDate = tz.TZDateTime(
-          tz.local,
-          now.year,
-          now.month + 1,
-          day,
-          hour,
-          minute,
-        );
+      final granted = await androidPlugin.requestNotificationsPermission();
+      if (granted == false) {
+        throw StateError('Ative as notifica\u00e7\u00f5es do FinanTech nas configura\u00e7\u00f5es do celular.');
       }
     }
+  }
 
-    return scheduledDate;
+  /// Ativa e atualiza os avisos individuais de vencimento.
+  Future<void> scheduleMonthlyReminder() async {
+    await _setReminderEnabled(true);
+    await syncExpenseReminders();
+  }
+
+  bool _initialized = false;
+
+  static DateTime reminderDate(DateTime due, int hour, int minute) =>
+      DateTime(due.year, due.month, due.day - 1, hour, minute);
+
+  Future<void> syncExpenseReminders() async {
+    if (!_initialized) return;
+    // Remove também o antigo lembrete mensal durante a migração.
+    await _notificationsPlugin.cancelAll();
+    if (!await isReminderEnabled()) return;
+    final db = await DatabaseHelper().database;
+    final rows = await db.query(DatabaseHelper.tableGastos,
+        where: 'pago = 0 AND vencimento IS NOT NULL');
+    final hour = await getReminderHour();
+    final minute = await getReminderMinute();
+    final now = DateTime.now();
+    final upcoming = rows.map(Gasto.fromMap).where((g) =>
+      reminderDate(g.vencimento!, hour, minute).isAfter(now)).toList()
+      ..sort((a, b) => a.vencimento!.compareTo(b.vencimento!));
+    for (final gasto in (defaultTargetPlatform == TargetPlatform.iOS ? upcoming.take(60) : upcoming)) {
+      final date = reminderDate(gasto.vencimento!, hour, minute);
+      await _notificationsPlugin.zonedSchedule(
+        gasto.id! + 100,
+        'Conta vence amanhã',
+        '${gasto.origem}: R\$ ${gasto.valor.toStringAsFixed(2).replaceAll('.', ',')}. Vence amanhã.',
+        // DateTime usa o fuso do celular, convertido para um instante UTC.
+        tz.TZDateTime.from(date, tz.UTC),
+        const NotificationDetails(
+          android: AndroidNotificationDetails(_channelId, _channelName,
+            channelDescription: 'Avisos um dia antes do vencimento das contas',
+            importance: Importance.high, priority: Priority.high,
+            playSound: true, enableVibration: true),
+          iOS: DarwinNotificationDetails(presentAlert: true, presentSound: true, presentBadge: true)),
+        androidScheduleMode: AndroidScheduleMode.inexactAllowWhileIdle,
+        uiLocalNotificationDateInterpretation: UILocalNotificationDateInterpretation.absoluteTime,
+      );
+    }
+  }
+
+  /// Atualiza os avisos sem comprometer a gravação dos gastos.
+  Future<void> refreshAfterChange() async {
+    try { await syncExpenseReminders(); }
+    catch (error) { debugPrint('Erro ao atualizar lembretes: $error'); }
   }
 
   /// Cancela o lembrete mensal agendado.
   /// 
   /// Remove qualquer notificação pendente com o ID do lembrete mensal.
   Future<void> cancelMonthlyReminder() async {
-    await _notificationsPlugin.cancel(_monthlyReminderId);
+    await _notificationsPlugin.cancelAll();
     await _setReminderEnabled(false);
   }
 
@@ -303,15 +247,18 @@ class NotificationService {
   /// Útil para verificar se as notificações estão funcionando.
   /// Não afeta o lembrete mensal agendado.
   Future<void> showTestNotification() async {
+    await _requestNotificationPermission();
     const androidDetails = AndroidNotificationDetails(
       _channelId,
       _channelName,
       channelDescription: _channelDescription,
       importance: Importance.high,
       priority: Priority.high,
+      playSound: true,
+      enableVibration: true,
     );
 
-    const notificationDetails = NotificationDetails(android: androidDetails);
+    const notificationDetails = NotificationDetails(android: androidDetails, iOS: DarwinNotificationDetails(presentAlert: true, presentSound: true));
 
     await _notificationsPlugin.show(
       0, // ID diferente do lembrete mensal

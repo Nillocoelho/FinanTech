@@ -10,7 +10,7 @@ class DatabaseHelper {
   static const String _databaseName = 'finantech.db';
   
   // Versão do banco (incrementar quando houver mudanças na estrutura)
-  static const int _databaseVersion = 1;
+  static const int _databaseVersion = 2;
   
   // Nome da tabela de gastos
   static const String tableGastos = 'gastos';
@@ -66,7 +66,8 @@ class DatabaseHelper {
         pago INTEGER NOT NULL DEFAULT 0,
         mes INTEGER NOT NULL,
         ano INTEGER NOT NULL,
-        createdAt TEXT NOT NULL
+        createdAt TEXT NOT NULL,
+        vencimento TEXT
       )
     ''');
 
@@ -85,6 +86,9 @@ class DatabaseHelper {
   /// 
   /// Permite migrar dados ou estrutura quando o app é atualizado.
   Future<void> _onUpgrade(Database db, int oldVersion, int newVersion) async {
+    if (oldVersion < 2) {
+      await db.execute('ALTER TABLE gastos ADD COLUMN vencimento TEXT');
+    }
     // Implementar migrações futuras aqui se necessário
     // Exemplo:
     // if (oldVersion < 2) {

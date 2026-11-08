@@ -1,3 +1,4 @@
+import '../services/notification_service.dart';
 import 'package:sqflite/sqflite.dart';
 import '../models/gasto.dart';
 import 'database_helper.dart';
@@ -16,11 +17,13 @@ class GastosRepository {
   Future<int> insertGasto(Gasto gasto) async {
     final db = await _databaseHelper.database;
     
-    return await db.insert(
+    final result = await db.insert(
       DatabaseHelper.tableGastos,
       gasto.toMap(),
       conflictAlgorithm: ConflictAlgorithm.replace,
     );
+    await NotificationService().refreshAfterChange();
+    return result;
   }
 
   /// Retorna todos os gastos de um mês/ano específico
@@ -49,12 +52,14 @@ class GastosRepository {
   Future<int> atualizarPago(int id, bool pago) async {
     final db = await _databaseHelper.database;
     
-    return await db.update(
+    final result = await db.update(
       DatabaseHelper.tableGastos,
       {'pago': pago ? 1 : 0},
       where: 'id = ?',
       whereArgs: [id],
     );
+    await NotificationService().refreshAfterChange();
+    return result;
   }
 
   /// Calcula o total de gastos não pagos de um mês/ano
@@ -108,11 +113,13 @@ class GastosRepository {
   Future<int> deleteGasto(int id) async {
     final db = await _databaseHelper.database;
     
-    return await db.delete(
+    final result = await db.delete(
       DatabaseHelper.tableGastos,
       where: 'id = ?',
       whereArgs: [id],
     );
+    await NotificationService().refreshAfterChange();
+    return result;
   }
 
   /// Atualiza um gasto existente
@@ -122,12 +129,14 @@ class GastosRepository {
   Future<int> updateGasto(Gasto gasto) async {
     final db = await _databaseHelper.database;
     
-    return await db.update(
+    final result = await db.update(
       DatabaseHelper.tableGastos,
       gasto.toMap(),
       where: 'id = ?',
       whereArgs: [gasto.id],
     );
+    await NotificationService().refreshAfterChange();
+    return result;
   }
 
   /// Busca um gasto pela origem em um mês/ano específico.
@@ -171,6 +180,8 @@ class GastosRepository {
 
     final gastoAtualizado = gastoExistente.copyWith(
       valor: gastoExistente.valor + gasto.valor,
+      vencimento: gasto.vencimento,
+      pago: false,
     );
     await updateGasto(gastoAtualizado);
     return (somado: true, gasto: gastoAtualizado);
