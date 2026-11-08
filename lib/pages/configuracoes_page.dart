@@ -1,10 +1,13 @@
 import 'dart:io';
+
 import 'package:flutter/material.dart';
 import 'package:file_picker/file_picker.dart';
 import 'package:share_plus/share_plus.dart';
+
 import '../services/notification_service.dart';
 import '../services/csv_service.dart';
 import '../services/backup_service.dart';
+import '../widgets/settings_content.dart';
 
 /// Tela de configurações do aplicativo.
 ///
@@ -26,9 +29,8 @@ class _ConfiguracoesPageState extends State<ConfiguracoesPage> {
 
   void _mensagemBackup(String mensagem) {
     if (!mounted) return;
-    ScaffoldMessenger.of(
-      context,
-    ).showSnackBar(SnackBar(content: Text(mensagem)));
+    ScaffoldMessenger.of(context)
+        .showSnackBar(SnackBar(content: Text(mensagem)));
   }
 
   Future<void> _criarBackup() async {
@@ -432,183 +434,37 @@ class _ConfiguracoesPageState extends State<ConfiguracoesPage> {
     );
   }
 
-  Widget _buildSectionHeader(String title) {
-    return Padding(
-      padding: const EdgeInsets.fromLTRB(16, 24, 16, 8),
-      child: Text(
-        title,
-        style: TextStyle(
-          fontSize: 14,
-          fontWeight: FontWeight.bold,
-          color: Theme.of(context).colorScheme.primary,
-        ),
-      ),
+  @override
+  Widget build(BuildContext context) {
+    final time =
+        '${_horaLembrete.toString().padLeft(2, '0')}:${_minutoLembrete.toString().padLeft(2, '0')}';
+    return Scaffold(
+      appBar: AppBar(title: const Text('Ajustes')),
+      body: _isLoading
+          ? const Center(child: CircularProgressIndicator())
+          : SettingsContent(
+              enabled: _lembreteAtivo,
+              time: time,
+              busy: _backupBusy,
+              onToggle: (value) =>
+                  _runSettingAction(() => _toggleLembrete(value)),
+              onTime: () => _runSettingAction(_selecionarHorario),
+              onTest: () => _runSettingAction(_enviarNotificacaoTeste),
+              onBackup: _criarBackup,
+              onRestore: () => _restaurarBackup(),
+              onLocal: () => _restaurarBackup(local: true),
+              onExport: _exportarDados,
+              onImport: _importarDados,
+            ),
     );
   }
 
-  @override
-  Widget build(BuildContext context) {
-    final horarioFormatado =
-        '${_horaLembrete.toString().padLeft(2, '0')}:${_minutoLembrete.toString().padLeft(2, '0')}';
-
-    return Scaffold(
-      appBar: AppBar(title: const Text('Configurações'), centerTitle: true),
-      body: _isLoading
-          ? const Center(child: CircularProgressIndicator())
-          : ListView(
-              children: [
-                // Seção de Notificações
-                _buildSectionHeader('Notificações'),
-
-                // Switch do lembrete mensal
-                SwitchListTile(
-                  title: const Text('Lembretes de vencimento'),
-                  subtitle: Text(
-                    _lembreteAtivo
-                        ? 'Na véspera do vencimento às $horarioFormatado'
-                        : 'Desativado',
-                  ),
-                  value: _lembreteAtivo,
-                  onChanged: _toggleLembrete,
-                  secondary: Icon(
-                    _lembreteAtivo
-                        ? Icons.notifications_active
-                        : Icons.notifications_off,
-                    color: _lembreteAtivo
-                        ? Theme.of(context).colorScheme.primary
-                        : Colors.grey,
-                  ),
-                ),
-
-                ListTile(
-                  enabled: _lembreteAtivo,
-                  leading: Icon(
-                    Icons.access_time,
-                    color: _lembreteAtivo ? null : Colors.grey,
-                  ),
-                  title: const Text('Horário do lembrete'),
-                  subtitle: Text(horarioFormatado),
-                  trailing: const Icon(Icons.chevron_right),
-                  onTap: _lembreteAtivo ? _selecionarHorario : null,
-                ),
-
-                const Divider(),
-
-                // Botão de teste de notificação
-                ListTile(
-                  leading: const Icon(Icons.bug_report),
-                  title: const Text('Testar notificação'),
-                  subtitle: const Text('Enviar uma notificação agora'),
-                  trailing: const Icon(Icons.chevron_right),
-                  onTap: _enviarNotificacaoTeste,
-                ),
-
-                const Divider(height: 32),
-
-                _buildSectionHeader('Backup completo dos gastos'),
-                if (_backupBusy) const LinearProgressIndicator(),
-                ListTile(
-                  leading: const Icon(Icons.backup_outlined),
-                  title: const Text('Criar e compartilhar backup'),
-                  subtitle: const Text(
-                    'Todos os meses, valores, vencimentos e pagamentos',
-                  ),
-                  onTap: _backupBusy ? null : _criarBackup,
-                ),
-                ListTile(
-                  leading: const Icon(Icons.restore),
-                  title: const Text('Restaurar de um arquivo'),
-                  subtitle: const Text(
-                    'Selecionar um backup FinanTech (.json)',
-                  ),
-                  onTap: _backupBusy ? null : () => _restaurarBackup(),
-                ),
-                ListTile(
-                  leading: const Icon(Icons.folder_copy_outlined),
-                  title: const Text('Backups neste aparelho'),
-                  subtitle: const Text(
-                    'Recuperar uma cópia salva anteriormente',
-                  ),
-                  onTap: _backupBusy
-                      ? null
-                      : () => _restaurarBackup(local: true),
-                ),
-                // Seção de Dados
-                _buildSectionHeader('Importação / Exportação'),
-
-                // Exportar para CSV
-                ListTile(
-                  leading: const Icon(Icons.upload_file),
-                  title: const Text('Exportar para planilha'),
-                  subtitle: const Text(
-                    'Gerar arquivo CSV no formato da planilha',
-                  ),
-                  trailing: const Icon(Icons.chevron_right),
-                  onTap: _exportarDados,
-                ),
-
-                // Importar de CSV
-                ListTile(
-                  leading: const Icon(Icons.download),
-                  title: const Text('Importar de planilha'),
-                  subtitle: const Text('Importar gastos de um arquivo CSV'),
-                  trailing: const Icon(Icons.chevron_right),
-                  onTap: _importarDados,
-                ),
-
-                const Divider(height: 32),
-
-                // Seção Sobre
-                _buildSectionHeader('Sobre'),
-
-                const ListTile(
-                  leading: Icon(Icons.info_outline),
-                  title: Text('FinanTech'),
-                  subtitle: Text('Versão 1.0.0\nControle de gastos mensais'),
-                  isThreeLine: true,
-                ),
-
-                const SizedBox(height: 24),
-
-                // Informação sobre o formato CSV
-                Padding(
-                  padding: const EdgeInsets.symmetric(horizontal: 16),
-                  child: Card(
-                    child: Padding(
-                      padding: const EdgeInsets.all(16),
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Row(
-                            children: [
-                              Icon(
-                                Icons.lightbulb_outline,
-                                color: Theme.of(context).colorScheme.primary,
-                              ),
-                              const SizedBox(width: 8),
-                              const Text(
-                                'Formato CSV',
-                                style: TextStyle(fontWeight: FontWeight.bold),
-                              ),
-                            ],
-                          ),
-                          const SizedBox(height: 8),
-                          const Text(
-                            'O arquivo CSV segue o formato da planilha com:\n'
-                            '• Colunas: Origem, Abril, Maio, ... Abril\n'
-                            '• Valores em formato brasileiro (vírgula)\n'
-                            '• Linha de total no final',
-                            style: TextStyle(fontSize: 13),
-                          ),
-                        ],
-                      ),
-                    ),
-                  ),
-                ),
-
-                const SizedBox(height: 32),
-              ],
-            ),
-    );
+  Future<void> _runSettingAction(Future<void> Function() action) async {
+    try {
+      await action();
+    } catch (error) {
+      await _carregarConfiguracoes();
+      _mensagemBackup(error.toString());
+    }
   }
 }

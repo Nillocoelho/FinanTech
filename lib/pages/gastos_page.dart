@@ -1,50 +1,41 @@
-import 'dart:ui';
-
 import 'package:flutter/material.dart';
-import 'package:intl/intl.dart';
+
 import '../data/gastos_repository.dart';
 import '../data/preferences_service.dart';
 import '../models/gasto.dart';
-import '../utils/currency_helper.dart';
+import '../ui/finance_theme.dart';
+import '../ui/finance_widgets.dart';
 import '../utils/installment_helper.dart';
+import '../widgets/expense_editor.dart';
 import 'configuracoes_page.dart';
 
-enum FiltroStatus { todos, abertos, pagos }
+enum FiltroStatus { todos, abertos, pagos, vencidos }
 
-enum Ordenacao { recentes, alfabetica, maiorValor, menorValor }
-
-enum TipoLancamento { direto, parcelado }
-
-const Duration _modalTransitionDuration = Duration(milliseconds: 220);
+enum Ordenacao { vencimento, alfabetica, maiorValor, menorValor, recentes }
 
 class GastosPage extends StatefulWidget {
-  const GastosPage({super.key});
-
+  const GastosPage({super.key, this.repository, this.now});
+  final GastosRepository? repository;
+  final DateTime Function()? now;
   @override
   State<GastosPage> createState() => _GastosPageState();
 }
 
 class _GastosPageState extends State<GastosPage> {
-  final GastosRepository _repository = GastosRepository();
-  final PreferencesService _prefsService = PreferencesService();
-
-  int _mesSelecionado = DateTime.now().month;
-  int _anoSelecionado = DateTime.now().year;
-  List<Gasto> _gastos = [];
-  Map<String, double> _totaisPorOrigem = {};
-  double _totalEmAberto = 0.0;
-  bool _isLoading = true;
-  bool _prefsLoaded = false;
-  List<String> _origensDisponiveis = [];
-  FiltroStatus _filtroStatus = FiltroStatus.todos;
-  Ordenacao _ordenacao = Ordenacao.alfabetica;
-  final NumberFormat _currencyFormat = NumberFormat.currency(
-    locale: 'pt_BR',
-    symbol: 'R\$',
-    decimalDigits: 2,
-  );
-
-  static const List<String> _nomesMeses = [
+  late final GastosRepository _repository;
+  final _preferences = PreferencesService();
+  final _search = TextEditingController();
+  late DateTime _period;
+  List<Gasto> _expenses = [];
+  List<String> _origins = [];
+  bool _loading = true;
+  bool _saving = false;
+  String? _error;
+  int _tab = 0;
+  int _loadGeneration = 0;
+  FiltroStatus _filter = FiltroStatus.todos;
+  Ordenacao _order = Ordenacao.vencimento;
+  static const _months = [
     'Janeiro',
     'Fevereiro',
     'Março',
@@ -58,633 +49,219 @@ class _GastosPageState extends State<GastosPage> {
     'Novembro',
     'Dezembro',
   ];
+  DateTime get _now => widget.now?.call() ?? DateTime.now();
+  String get _periodLabel => '${_months[_period.month - 1]} ${_period.year}';
 
   @override
   void initState() {
     super.initState();
-    _carregarPreferenciasEDados();
+    _repository = widget.repository ?? GastosRepository();
+    _period = DateTime(_now.year, _now.month);
+    _initialize();
   }
 
-  Future<void> _carregarPreferenciasEDados() async {
-    if (!_prefsLoaded) {
-      final mesAno = await _prefsService.getMesAnoSelecionado();
-      setState(() {
-        _mesSelecionado = mesAno.mes;
-        _anoSelecionado = mesAno.ano;
-        _prefsLoaded = true;
-      });
-    }
-    await _carregarDados();
+  @override
+  void dispose() {
+    _search.dispose();
+    super.dispose();
   }
 
-  Future<void> _carregarDados() async {
-    setState(() => _isLoading = true);
+  Future<void> _initialize() async {
     try {
-      final results = await Future.wait([
-        _repository.getGastosDoMes(_mesSelecionado, _anoSelecionado),
-        _repository.getTotaisPorOrigemDoMes(_mesSelecionado, _anoSelecionado),
-        _repository.getTotalDoMes(_mesSelecionado, _anoSelecionado),
+      final saved = await _preferences.getMesAnoSelecionado();
+      if (!mounted) return;
+      _period = DateTime(saved.ano, saved.mes);
+      await _load();
+    } catch (_) {
+      if (mounted) {
+        setState(() {
+          _loading = false;
+          _error = 'Não foi possível abrir seus lançamentos.';
+        });
+      }
+    }
+  }
+
+  Future<void> _load() async {
+    final generation = ++_loadGeneration;
+    setState(() {
+      _loading = true;
+      _error = null;
+    });
+    try {
+      final result = await Future.wait([
+        _repository.getGastosDoMes(_period.month, _period.year),
         _repository.getOrigensDistintas(),
       ]);
+      if (!mounted || generation != _loadGeneration) return;
       setState(() {
-        _gastos = results[0] as List<Gasto>;
-        _totaisPorOrigem = results[1] as Map<String, double>;
-        _totalEmAberto = results[2] as double;
-        _origensDisponiveis = results[3] as List<String>;
-        _isLoading = false;
+        _expenses = result[0] as List<Gasto>;
+        _origins = result[1] as List<String>;
+        _loading = false;
       });
-    } catch (e) {
-      setState(() => _isLoading = false);
-      _mostrarErro('Erro ao carregar dados: $e');
+    } catch (_) {
+      if (!mounted || generation != _loadGeneration) return;
+      setState(() {
+        _loading = false;
+        _error = 'Não foi possível carregar este mês. Seus dados não foram alterados.';
+      });
     }
   }
 
-  List<Gasto> get _gastosFiltrados {
-    // Primeiro filtra
-    final resultado = _gastos.where((gasto) {
-      if (_filtroStatus == FiltroStatus.abertos && gasto.pago) return false;
-      if (_filtroStatus == FiltroStatus.pagos && !gasto.pago) return false;
-      return true;
-    }).toList();
-
-    // Depois ordena
-    switch (_ordenacao) {
-      case Ordenacao.recentes:
-        // Já vem ordenado por createdAt DESC do banco
-        break;
-      case Ordenacao.alfabetica:
-        resultado.sort(
-          (a, b) => a.origem.toLowerCase().compareTo(b.origem.toLowerCase()),
-        );
-        break;
-      case Ordenacao.maiorValor:
-        resultado.sort((a, b) => b.valor.compareTo(a.valor));
-        break;
-      case Ordenacao.menorValor:
-        resultado.sort((a, b) => a.valor.compareTo(b.valor));
-        break;
+  Future<void> _changePeriod(DateTime period) async {
+    setState(() => _period = period);
+    await _load();
+    try {
+      await _preferences.salvarMesAnoSelecionado(period.month, period.year);
+    } catch (_) {
+      if (mounted) _message('O período não pôde ser salvo nas preferências.');
     }
-
-    return resultado;
   }
 
-  Future<void> _abrirModalAdicionarGasto() async {
-    final nomeController = TextEditingController();
-    final valorController = TextEditingController();
-    final parcelasController = TextEditingController(text: '2');
-    final formKey = GlobalKey<FormState>();
-    TipoLancamento tipo = TipoLancamento.direto;
-    DateTime? vencimento;
-
-    final confirmado = await showGeneralDialog<bool>(
-      context: context,
-      barrierDismissible: true,
-      barrierLabel: 'Novo gasto',
-      barrierColor: Colors.black.withValues(alpha: 0.35),
-      transitionDuration: _modalTransitionDuration,
-      pageBuilder: (context, _, _) {
-        return StatefulBuilder(
-          builder: (context, setModalState) {
-            final total = CurrencyHelper.parseFromCurrency(
-              valorController.text,
-            );
-            final quantidadeParcelas =
-                int.tryParse(parcelasController.text.trim()) ?? 0;
-            final isParcelado = tipo == TipoLancamento.parcelado;
-            final parcelasPreview =
-                isParcelado && total > 0 && quantidadeParcelas > 1
-                ? InstallmentHelper.splitAmount(total, quantidadeParcelas)
-                : const <double>[];
-
-            return SafeArea(
-              child: Padding(
-                padding: EdgeInsets.only(
-                  bottom: MediaQuery.of(context).viewInsets.bottom,
-                ),
-                child: Center(
-                  child: Material(
-                    color: Colors.transparent,
-                    child: Stack(
-                      children: [
-                        Positioned.fill(
-                          child: BackdropFilter(
-                            filter: ImageFilter.blur(sigmaX: 8, sigmaY: 8),
-                            child: const SizedBox.expand(),
-                          ),
-                        ),
-                        Center(
-                          child: Container(
-                            width: 560,
-                            constraints: BoxConstraints(
-                              maxWidth: MediaQuery.of(context).size.width - 32,
-                            ),
-                            margin: const EdgeInsets.all(16),
-                            padding: const EdgeInsets.all(24),
-                            decoration: BoxDecoration(
-                              color: Theme.of(context).colorScheme.surface,
-                              borderRadius: BorderRadius.circular(28),
-                              border: Border.all(
-                                color: Theme.of(context)
-                                    .colorScheme
-                                    .outlineVariant
-                                    .withValues(alpha: 0.4),
-                              ),
-                              boxShadow: [
-                                BoxShadow(
-                                  color: Colors.black.withValues(alpha: 0.18),
-                                  blurRadius: 30,
-                                  offset: const Offset(0, 18),
-                                ),
-                              ],
-                            ),
-                            child: SingleChildScrollView(
-                              child: Form(
-                                key: formKey,
-                                child: Column(
-                                  mainAxisSize: MainAxisSize.min,
-                                  crossAxisAlignment:
-                                      CrossAxisAlignment.stretch,
-                                  children: [
-                                    Row(
-                                      children: [
-                                        Container(
-                                          padding: const EdgeInsets.all(10),
-                                          decoration: BoxDecoration(
-                                            color: Theme.of(
-                                              context,
-                                            ).colorScheme.primaryContainer,
-                                            borderRadius: BorderRadius.circular(
-                                              14,
-                                            ),
-                                          ),
-                                          child: Icon(
-                                            Icons.add_card_rounded,
-                                            color: Theme.of(
-                                              context,
-                                            ).colorScheme.onPrimaryContainer,
-                                          ),
-                                        ),
-                                        const SizedBox(width: 12),
-                                        Expanded(
-                                          child: Column(
-                                            crossAxisAlignment:
-                                                CrossAxisAlignment.start,
-                                            children: [
-                                              Text(
-                                                'Novo gasto',
-                                                style: Theme.of(context)
-                                                    .textTheme
-                                                    .titleLarge
-                                                    ?.copyWith(
-                                                      fontWeight:
-                                                          FontWeight.w700,
-                                                    ),
-                                              ),
-                                              Text(
-                                                'Cadastro para ${_nomesMeses[_mesSelecionado - 1]} de $_anoSelecionado',
-                                                style: Theme.of(context)
-                                                    .textTheme
-                                                    .bodyMedium
-                                                    ?.copyWith(
-                                                      color: Theme.of(context)
-                                                          .colorScheme
-                                                          .onSurfaceVariant,
-                                                    ),
-                                              ),
-                                            ],
-                                          ),
-                                        ),
-                                        IconButton(
-                                          onPressed: () =>
-                                              Navigator.pop(context, false),
-                                          icon: const Icon(Icons.close),
-                                        ),
-                                      ],
-                                    ),
-                                    const SizedBox(height: 24),
-                                    TextFormField(
-                                      controller: nomeController,
-                                      textCapitalization:
-                                          TextCapitalization.words,
-                                      decoration: InputDecoration(
-                                        labelText: 'Nome do gasto',
-                                        hintText: 'Ex: Cartão Santander',
-                                        prefixIcon: const Icon(
-                                          Icons.label_outline,
-                                        ),
-                                        suffixIcon:
-                                            _origensDisponiveis.isNotEmpty
-                                            ? PopupMenuButton<String>(
-                                                icon: const Icon(
-                                                  Icons.arrow_drop_down,
-                                                ),
-                                                onSelected: (value) =>
-                                                    nomeController.text = value,
-                                                itemBuilder: (_) =>
-                                                    _origensDisponiveis
-                                                        .map(
-                                                          (origem) =>
-                                                              PopupMenuItem(
-                                                                value: origem,
-                                                                child: Text(
-                                                                  origem,
-                                                                ),
-                                                              ),
-                                                        )
-                                                        .toList(),
-                                              )
-                                            : null,
-                                      ),
-                                      validator: (value) {
-                                        if (value == null ||
-                                            value.trim().isEmpty) {
-                                          return 'Informe o nome do gasto';
-                                        }
-                                        return null;
-                                      },
-                                    ),
-                                    const SizedBox(height: 16),
-                                    TextFormField(
-                                      controller: valorController,
-                                      decoration: InputDecoration(
-                                        labelText: isParcelado
-                                            ? 'Valor total'
-                                            : 'Valor',
-                                        hintText: '0,00',
-                                        prefixText: 'R\$ ',
-                                        prefixIcon: const Icon(
-                                          Icons.attach_money,
-                                        ),
-                                      ),
-                                      keyboardType: TextInputType.number,
-                                      inputFormatters: [
-                                        CurrencyInputFormatter(),
-                                      ],
-                                      onChanged: (_) => setModalState(() {}),
-                                      validator: (value) {
-                                        if (value == null || value.isEmpty) {
-                                          return 'Informe o valor';
-                                        }
-                                        if (CurrencyHelper.parseFromCurrency(
-                                              value,
-                                            ) <=
-                                            0) {
-                                          return 'Valor inválido';
-                                        }
-                                        return null;
-                                      },
-                                    ),
-                                    const SizedBox(height: 16),
-                                    _campoVencimento(
-                                      context,
-                                      vencimento,
-                                      (data) => setModalState(
-                                        () => vencimento = data,
-                                      ),
-                                    ),
-                                    const SizedBox(height: 18),
-                                    SegmentedButton<TipoLancamento>(
-                                      segments: const [
-                                        ButtonSegment<TipoLancamento>(
-                                          value: TipoLancamento.direto,
-                                          label: Text('Direto'),
-                                          icon: Icon(Icons.flash_on_outlined),
-                                        ),
-                                        ButtonSegment<TipoLancamento>(
-                                          value: TipoLancamento.parcelado,
-                                          label: Text('Parcelado'),
-                                          icon: Icon(
-                                            Icons.view_carousel_outlined,
-                                          ),
-                                        ),
-                                      ],
-                                      selected: {tipo},
-                                      onSelectionChanged: (selection) {
-                                        setModalState(() {
-                                          tipo = selection.first;
-                                          if (tipo == TipoLancamento.direto) {
-                                            parcelasController.text = '2';
-                                          }
-                                        });
-                                      },
-                                    ),
-                                    AnimatedSwitcher(
-                                      duration: const Duration(
-                                        milliseconds: 180,
-                                      ),
-                                      child: !isParcelado
-                                          ? const SizedBox(height: 12)
-                                          : Column(
-                                              key: const ValueKey('parcelado'),
-                                              crossAxisAlignment:
-                                                  CrossAxisAlignment.stretch,
-                                              children: [
-                                                const SizedBox(height: 16),
-                                                TextFormField(
-                                                  controller:
-                                                      parcelasController,
-                                                  keyboardType:
-                                                      TextInputType.number,
-                                                  onChanged: (_) =>
-                                                      setModalState(() {}),
-                                                  decoration: const InputDecoration(
-                                                    labelText:
-                                                        'Quantidade de meses',
-                                                    hintText: 'Ex: 12',
-                                                    prefixIcon: Icon(
-                                                      Icons.calendar_view_month,
-                                                    ),
-                                                  ),
-                                                  validator: (value) {
-                                                    if (!isParcelado) {
-                                                      return null;
-                                                    }
-                                                    final parcelas =
-                                                        int.tryParse(
-                                                          value?.trim() ?? '',
-                                                        );
-                                                    if (parcelas == null ||
-                                                        parcelas < 2) {
-                                                      return 'Informe ao menos 2 meses';
-                                                    }
-                                                    return null;
-                                                  },
-                                                ),
-                                                const SizedBox(height: 14),
-                                                if (parcelasPreview.isNotEmpty)
-                                                  Container(
-                                                    padding:
-                                                        const EdgeInsets.all(
-                                                          16,
-                                                        ),
-                                                    decoration: BoxDecoration(
-                                                      color: Theme.of(context)
-                                                          .colorScheme
-                                                          .secondaryContainer
-                                                          .withValues(
-                                                            alpha: 0.35,
-                                                          ),
-                                                      borderRadius:
-                                                          BorderRadius.circular(
-                                                            18,
-                                                          ),
-                                                    ),
-                                                    child: Column(
-                                                      crossAxisAlignment:
-                                                          CrossAxisAlignment
-                                                              .start,
-                                                      children: [
-                                                        Text(
-                                                          '${parcelasPreview.length}x de ${CurrencyHelper.formatWithSymbol(parcelasPreview.first)}',
-                                                          style: Theme.of(context)
-                                                              .textTheme
-                                                              .titleSmall
-                                                              ?.copyWith(
-                                                                fontWeight:
-                                                                    FontWeight
-                                                                        .w700,
-                                                              ),
-                                                        ),
-                                                        const SizedBox(
-                                                          height: 6,
-                                                        ),
-                                                        Text(
-                                                          'As parcelas são distribuídas automaticamente entre os próximos meses, com ajuste de centavos no total.',
-                                                          style: Theme.of(
-                                                            context,
-                                                          ).textTheme.bodySmall,
-                                                        ),
-                                                        if (parcelasPreview
-                                                                .toSet()
-                                                                .length >
-                                                            1)
-                                                          Padding(
-                                                            padding:
-                                                                const EdgeInsets.only(
-                                                                  top: 8,
-                                                                ),
-                                                            child: Text(
-                                                              'Algumas parcelas podem variar em R\$ 0,01 para fechar o valor total.',
-                                                              style:
-                                                                  Theme.of(
-                                                                        context,
-                                                                      )
-                                                                      .textTheme
-                                                                      .bodySmall,
-                                                            ),
-                                                          ),
-                                                      ],
-                                                    ),
-                                                  ),
-                                              ],
-                                            ),
-                                    ),
-                                    const SizedBox(height: 24),
-                                    Row(
-                                      children: [
-                                        Expanded(
-                                          child: OutlinedButton(
-                                            onPressed: () =>
-                                                Navigator.pop(context, false),
-                                            child: const Text('Cancelar'),
-                                          ),
-                                        ),
-                                        const SizedBox(width: 12),
-                                        Expanded(
-                                          child: FilledButton.icon(
-                                            onPressed: () {
-                                              if (!formKey.currentState!
-                                                  .validate()) {
-                                                return;
-                                              }
-
-                                              Navigator.pop(context, true);
-                                            },
-                                            icon: const Icon(
-                                              Icons.check_circle_outline,
-                                            ),
-                                            label: Text(
-                                              isParcelado
-                                                  ? 'Lançar parcelas'
-                                                  : 'Salvar gasto',
-                                            ),
-                                          ),
-                                        ),
-                                      ],
-                                    ),
-                                  ],
-                                ),
-                              ),
-                            ),
-                          ),
-                        ),
-                      ],
-                    ),
-                  ),
-                ),
-              ),
-            );
-          },
-        );
+  List<Gasto> get _filtered {
+    final query = _search.text.trim().toLowerCase();
+    final result = _expenses
+        .where(
+          (g) =>
+              g.origem.toLowerCase().contains(query) &&
+              switch (_filter) {
+                FiltroStatus.todos => true,
+                FiltroStatus.abertos => !g.pago,
+                FiltroStatus.pagos => g.pago,
+                FiltroStatus.vencidos => g.vencidoEm(_now),
+              },
+        )
+        .toList();
+    result.sort(
+      (a, b) => switch (_order) {
+        Ordenacao.alfabetica => a.origem.toLowerCase().compareTo(
+          b.origem.toLowerCase(),
+        ),
+        Ordenacao.maiorValor => b.valor.compareTo(a.valor),
+        Ordenacao.menorValor => a.valor.compareTo(b.valor),
+        Ordenacao.recentes => b.createdAt.compareTo(a.createdAt),
+        Ordenacao.vencimento => _compareDue(a, b),
       },
-      transitionBuilder: (_, animation, _, child) {
-        return FadeTransition(
-          opacity: CurvedAnimation(parent: animation, curve: Curves.easeOut),
-          child: ScaleTransition(
-            scale: Tween<double>(begin: 0.94, end: 1).animate(
-              CurvedAnimation(parent: animation, curve: Curves.easeOutCubic),
-            ),
-            child: child,
+    );
+    return result;
+  }
+
+  int _compareDue(Gasto a, Gasto b) {
+    if (a.pago != b.pago) return a.pago ? 1 : -1;
+    return (a.vencimento ?? DateTime(9999)).compareTo(
+      b.vencimento ?? DateTime(9999),
+    );
+  }
+
+  void _message(String message) {
+    if (mounted) {
+      ScaffoldMessenger.of(context)
+          .showSnackBar(SnackBar(content: Text(message)));
+    }
+  }
+
+  Future<void> _edit([Gasto? expense]) async {
+    final draft = await showModalBottomSheet<ExpenseDraft>(
+      context: context,
+      isScrollControlled: true,
+      useSafeArea: true,
+      builder: (_) =>
+          ExpenseEditor(period: _period, origins: _origins, expense: expense),
+    );
+    if (draft == null || !mounted) return;
+    setState(() => _saving = true);
+    try {
+      if (expense != null) {
+        if (await _repository.existeGastoComOrigem(
+          draft.name,
+          expense.mes,
+          expense.ano,
+          excludeId: expense.id,
+        )) {
+          _message('Já existe uma conta com esse nome neste mês.');
+          return;
+        }
+        await _repository.updateGasto(
+          expense.copyWith(
+            origem: draft.name,
+            valor: draft.amount,
+            vencimento: draft.due,
           ),
         );
-      },
-    );
-
-    if (confirmado != true) {
-      _disposeModalControllers(
-        nomeController,
-        valorController,
-        parcelasController,
-      );
-      return;
-    }
-
-    final nome = nomeController.text.trim();
-    final valor = CurrencyHelper.parseFromCurrency(valorController.text);
-    final quantidadeParcelas =
-        int.tryParse(parcelasController.text.trim()) ?? 1;
-    final tipoSelecionado = tipo;
-
-    _disposeModalControllers(
-      nomeController,
-      valorController,
-      parcelasController,
-    );
-
-    await _salvarNovoGasto(
-      nome: nome,
-      valor: valor,
-      tipo: tipoSelecionado,
-      quantidadeParcelas: quantidadeParcelas,
-      vencimento: vencimento,
-    );
-  }
-
-  Future<void> _salvarNovoGasto({
-    required String nome,
-    required double valor,
-    required TipoLancamento tipo,
-    required int quantidadeParcelas,
-    DateTime? vencimento,
-  }) async {
-    if (valor <= 0) {
-      _mostrarErro('Por favor, insira um valor válido.');
-      return;
-    }
-
-    if (tipo == TipoLancamento.parcelado && quantidadeParcelas < 2) {
-      _mostrarErro('Informe ao menos 2 meses para parcelar.');
-      return;
-    }
-
-    final parcelas = tipo == TipoLancamento.parcelado
-        ? InstallmentHelper.splitAmount(valor, quantidadeParcelas)
-        : <double>[valor];
-
-    int itensCriados = 0;
-    int itensSomados = 0;
-
-    try {
-      for (int index = 0; index < parcelas.length; index++) {
-        final periodo = InstallmentHelper.addMonths(
-          _mesSelecionado,
-          _anoSelecionado,
-          index,
+      } else {
+        final parts = InstallmentHelper.splitAmount(
+          draft.amount,
+          draft.installments,
         );
-        final gasto = Gasto(
-          origem: nome,
-          vencimento: vencimento == null
-              ? null
-              : DateTime(
-                  vencimento.year,
-                  vencimento.month + index,
-                  vencimento.day
-                      .clamp(
-                        1,
-                        DateTime(
-                          vencimento.year,
-                          vencimento.month + index + 1,
-                          0,
-                        ).day,
-                      )
-                      .toInt(),
-                ),
-          valor: parcelas[index],
-          pago: false,
-          mes: periodo.mes,
-          ano: periodo.ano,
-          createdAt: DateTime.now().toIso8601String(),
-        );
-
-        final resultado = await _repository.salvarSomandoSeExistir(gasto);
-        if (resultado.somado) {
-          itensSomados++;
-        } else {
-          itensCriados++;
+        for (var index = 0; index < parts.length; index++) {
+          final period = InstallmentHelper.addMonths(
+            _period.month,
+            _period.year,
+            index,
+          );
+          final lastDay = DateTime(
+            draft.due.year,
+            draft.due.month + index + 1,
+            0,
+          ).day;
+          await _repository.salvarSomandoSeExistir(
+            Gasto(
+              origem: draft.name,
+              valor: parts[index],
+              pago: false,
+              mes: period.mes,
+              ano: period.ano,
+              createdAt: _now.toIso8601String(),
+              vencimento: DateTime(
+                draft.due.year,
+                draft.due.month + index,
+                draft.due.day.clamp(1, lastDay),
+              ),
+            ),
+          );
         }
       }
-
-      await _carregarDados();
-
       if (!mounted) return;
-
-      if (tipo == TipoLancamento.parcelado) {
-        _mostrarSucesso(
-          '$nome lançado em $quantidadeParcelas meses. '
-          '$itensCriados criados, $itensSomados somados.',
-        );
-      } else {
-        _mostrarSucesso(
-          itensSomados > 0
-              ? 'Valor de "$nome" atualizado com o novo incremento.'
-              : 'Gasto adicionado com sucesso!',
-        );
-      }
-    } catch (e) {
-      _mostrarErro('Erro ao adicionar gasto: $e');
+      await _load();
+      _message(
+        expense != null
+            ? 'Lançamento atualizado.'
+            : draft.installments > 1
+            ? '${draft.installments} parcelas adicionadas.'
+            : 'Lançamento adicionado.',
+      );
+    } catch (_) {
+      _message(
+        'Não foi possível salvar. Confira os lançamentos antes de tentar novamente.',
+      );
+    } finally {
+      if (mounted) setState(() => _saving = false);
     }
   }
 
-  void _disposeModalControllers(
-    TextEditingController nomeController,
-    TextEditingController valorController,
-    TextEditingController parcelasController,
-  ) {
-    Future<void>.delayed(_modalTransitionDuration, () {
-      nomeController.dispose();
-      valorController.dispose();
-      parcelasController.dispose();
-    });
-  }
-
-  Future<void> _togglePago(Gasto gasto) async {
+  Future<void> _pay(Gasto expense) async {
+    if (_saving) return;
+    setState(() => _saving = true);
     try {
-      await _repository.atualizarPago(gasto.id!, !gasto.pago);
-      await _carregarDados();
-      final status = !gasto.pago ? 'pago' : 'em aberto';
-      _mostrarSucesso('Gasto marcado como $status');
-    } catch (e) {
-      _mostrarErro('Erro ao atualizar gasto: $e');
+      await _repository.atualizarPago(expense.id!, !expense.pago);
+      if (mounted) await _load();
+      _message(
+        expense.pago ? 'Conta marcada em aberto.' : 'Pagamento registrado.',
+      );
+    } catch (_) {
+      _message('Não foi possível atualizar o pagamento.');
+    } finally {
+      if (mounted) setState(() => _saving = false);
     }
   }
 
-  Future<void> _confirmarExclusao(Gasto gasto) async {
-    final confirmado = await showDialog<bool>(
+  Future<void> _delete(Gasto expense) async {
+    final confirmed = await showDialog<bool>(
       context: context,
       builder: (ctx) => AlertDialog(
-        title: const Text('Confirmar exclusão'),
+        title: const Text('Excluir lançamento?'),
         content: Text(
-          'Excluir gasto de ${_currencyFormat.format(gasto.valor)} para "${gasto.origem}"?',
+          '${expense.origem} · ${money(expense.valor)}\nEsta ação não pode ser desfeita.',
         ),
         actions: [
           TextButton(
@@ -692,1218 +269,530 @@ class _GastosPageState extends State<GastosPage> {
             child: const Text('Cancelar'),
           ),
           FilledButton(
+            style: FilledButton.styleFrom(backgroundColor: FinanceColors.red),
             onPressed: () => Navigator.pop(ctx, true),
-            style: FilledButton.styleFrom(backgroundColor: Colors.red),
             child: const Text('Excluir'),
           ),
         ],
       ),
     );
-    if (confirmado == true) {
-      try {
-        await _repository.deleteGasto(gasto.id!);
-        await _carregarDados();
-        _mostrarSucesso('Gasto excluído com sucesso!');
-      } catch (e) {
-        _mostrarErro('Erro ao excluir gasto: $e');
-      }
+    if (confirmed != true || !mounted || _saving) return;
+    setState(() => _saving = true);
+    try {
+      await _repository.deleteGasto(expense.id!);
+      if (mounted) await _load();
+      _message('Lançamento excluído.');
+    } catch (_) {
+      _message('Não foi possível excluir o lançamento.');
+    } finally {
+      if (mounted) setState(() => _saving = false);
     }
   }
 
-  Widget _campoVencimento(
-    BuildContext ctx,
-    DateTime? data,
-    ValueChanged<DateTime> onChanged,
-  ) {
-    return FormField<DateTime>(
-      validator: (_) => data == null ? 'Informe o vencimento' : null,
-      builder: (field) => Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          ListTile(
-            contentPadding: EdgeInsets.zero,
-            leading: const Icon(Icons.event),
-            title: const Text('Vencimento'),
-            subtitle: Text(
-              data == null
-                  ? 'Selecione a data'
-                  : DateFormat('dd/MM/yyyy').format(data),
-            ),
-            onTap: () async {
-              FocusScope.of(ctx).unfocus();
-              final selecionada = await showDatePicker(
-                context: ctx,
-                initialDate:
-                    data ?? DateTime(_anoSelecionado, _mesSelecionado, 1),
-                firstDate: DateTime(2000),
-                lastDate: DateTime(2100, 12, 31),
-              );
-              if (selecionada != null) {
-                field.didChange(selecionada);
-                onChanged(selecionada);
-              }
-            },
-          ),
-          if (field.hasError)
-            Text(
-              field.errorText!,
-              style: TextStyle(color: Theme.of(ctx).colorScheme.error),
-            ),
-        ],
-      ),
-    );
-  }
-
-  Future<void> _editarGasto(Gasto gasto) async {
-    DateTime? vencimento = gasto.vencimento;
-    final origemCtrl = TextEditingController(text: gasto.origem);
-    final valorCtrl = TextEditingController(
-      text: CurrencyHelper.formatToCurrency(gasto.valor),
-    );
-    final formKey = GlobalKey<FormState>();
-    final resultado = await showModalBottomSheet<bool>(
+  Future<void> _selectPeriod() async {
+    var year = _period.year;
+    var month = _period.month;
+    final confirmed = await showDialog<bool>(
       context: context,
-      isScrollControlled: true,
       builder: (ctx) => StatefulBuilder(
-        builder: (ctx, setModalState) => SingleChildScrollView(
-          child: Padding(
-            padding: EdgeInsets.only(
-              bottom: MediaQuery.of(ctx).viewInsets.bottom,
-              left: 16,
-              right: 16,
-              top: 16,
-            ),
-            child: Form(
-              key: formKey,
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                crossAxisAlignment: CrossAxisAlignment.stretch,
-                children: [
-                  Text(
-                    'Editar Gasto',
-                    style: Theme.of(ctx).textTheme.titleLarge,
-                  ),
-                  const SizedBox(height: 16),
-                  TextFormField(
-                    controller: origemCtrl,
-                    decoration: const InputDecoration(
-                      labelText: 'Origem',
-                      border: OutlineInputBorder(),
-                    ),
-                    validator: (v) => v == null || v.trim().isEmpty
-                        ? 'Informe a origem'
-                        : null,
-                  ),
-                  const SizedBox(height: 16),
-                  TextFormField(
-                    controller: valorCtrl,
-                    decoration: const InputDecoration(
-                      labelText: 'Valor',
-                      border: OutlineInputBorder(),
-                      prefixText: 'R\$ ',
-                    ),
-                    keyboardType: TextInputType.number,
-                    inputFormatters: [CurrencyInputFormatter()],
-                    validator: (v) {
-                      if (v == null || v.isEmpty) return 'Informe o valor';
-                      if (CurrencyHelper.parseFromCurrency(v) <= 0) {
-                        return 'Valor inválido';
-                      }
-                      return null;
-                    },
-                  ),
-                  _campoVencimento(
-                    ctx,
-                    vencimento,
-                    (data) => setModalState(() => vencimento = data),
-                  ),
-                  const SizedBox(height: 24),
-                  Row(
-                    children: [
-                      Expanded(
-                        child: OutlinedButton(
-                          onPressed: () => Navigator.pop(ctx, false),
-                          child: const Text('Cancelar'),
-                        ),
-                      ),
-                      const SizedBox(width: 16),
-                      Expanded(
-                        child: FilledButton(
-                          onPressed: () {
-                            if (formKey.currentState!.validate()) {
-                              Navigator.pop(ctx, true);
-                            }
-                          },
-                          child: const Text('Salvar'),
-                        ),
-                      ),
-                    ],
-                  ),
-                  const SizedBox(height: 16),
-                ],
-              ),
-            ),
-          ),
-        ),
-      ),
-    );
-    if (resultado == true) {
-      try {
-        final novaOrigem = origemCtrl.text.trim();
-        // Verificar duplicados apenas se a origem foi alterada
-        if (novaOrigem.toLowerCase() != gasto.origem.toLowerCase()) {
-          final duplicado = await _repository.existeGastoComOrigem(
-            novaOrigem,
-            gasto.mes,
-            gasto.ano,
-            excludeId: gasto.id,
-          );
-          if (duplicado) {
-            _mostrarErro(
-              'Já existe um gasto com o nome "$novaOrigem" neste mês.',
-            );
-            origemCtrl.dispose();
-            valorCtrl.dispose();
-            return;
-          }
-        }
-        final gastoAtualizado = gasto.copyWith(
-          origem: novaOrigem,
-          vencimento: vencimento,
-          valor: CurrencyHelper.parseFromCurrency(valorCtrl.text),
-        );
-        await _repository.updateGasto(gastoAtualizado);
-        await _carregarDados();
-        _mostrarSucesso('Gasto atualizado com sucesso!');
-      } catch (e) {
-        _mostrarErro('Erro ao atualizar gasto: $e');
-      }
-    }
-    origemCtrl.dispose();
-    valorCtrl.dispose();
-  }
-
-  void _mostrarErro(String msg) => ScaffoldMessenger.of(context).showSnackBar(
-    SnackBar(
-      content: Text(msg),
-      backgroundColor: Colors.red,
-      behavior: SnackBarBehavior.floating,
-    ),
-  );
-
-  void _mostrarSucesso(String msg) =>
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text(msg),
-          backgroundColor: Colors.green,
-          behavior: SnackBarBehavior.floating,
-          duration: const Duration(seconds: 2),
-        ),
-      );
-
-  bool get _isMesAtual =>
-      _mesSelecionado == DateTime.now().month &&
-      _anoSelecionado == DateTime.now().year;
-
-  void _irParaMesAtual() {
-    setState(() {
-      _mesSelecionado = DateTime.now().month;
-      _anoSelecionado = DateTime.now().year;
-    });
-    _salvarPreferenciasECarregar();
-  }
-
-  void _proximoMes() {
-    setState(() {
-      if (_mesSelecionado == 12) {
-        _mesSelecionado = 1;
-        _anoSelecionado++;
-      } else {
-        _mesSelecionado++;
-      }
-    });
-    _salvarPreferenciasECarregar();
-  }
-
-  void _mesAnterior() {
-    setState(() {
-      if (_mesSelecionado == 1) {
-        _mesSelecionado = 12;
-        _anoSelecionado--;
-      } else {
-        _mesSelecionado--;
-      }
-    });
-    _salvarPreferenciasECarregar();
-  }
-
-  Future<void> _salvarPreferenciasECarregar() async {
-    await _prefsService.salvarMesAnoSelecionado(
-      _mesSelecionado,
-      _anoSelecionado,
-    );
-    await _carregarDados();
-  }
-
-  bool get _temFiltrosAtivos =>
-      _filtroStatus != FiltroStatus.todos || _ordenacao != Ordenacao.alfabetica;
-
-  String get _textoOrdenacao {
-    switch (_ordenacao) {
-      case Ordenacao.recentes:
-        return 'Recentes';
-      case Ordenacao.alfabetica:
-        return 'A-Z';
-      case Ordenacao.maiorValor:
-        return 'Maior valor';
-      case Ordenacao.menorValor:
-        return 'Menor valor';
-    }
-  }
-
-  void _mostrarFiltros() {
-    showModalBottomSheet(
-      context: context,
-      builder: (ctx) => Padding(
-        padding: const EdgeInsets.all(20),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Row(
-              children: [
-                const Icon(Icons.filter_list),
-                const SizedBox(width: 8),
-                Text(
-                  'Filtros e Ordenação',
-                  style: Theme.of(ctx).textTheme.titleLarge,
-                ),
-                const Spacer(),
-                if (_temFiltrosAtivos)
-                  TextButton(
-                    onPressed: () {
-                      setState(() {
-                        _filtroStatus = FiltroStatus.todos;
-                        _ordenacao = Ordenacao.alfabetica;
-                      });
-                      Navigator.pop(ctx);
-                    },
-                    child: const Text('Limpar'),
-                  ),
-              ],
-            ),
-            const SizedBox(height: 20),
-            const Text(
-              'Status:',
-              style: TextStyle(fontWeight: FontWeight.w600),
-            ),
-            const SizedBox(height: 8),
-            Wrap(
-              spacing: 8,
-              children: [
-                _buildChipFiltroModal('Todos', FiltroStatus.todos, ctx),
-                _buildChipFiltroModal('Em aberto', FiltroStatus.abertos, ctx),
-                _buildChipFiltroModal('Pagos', FiltroStatus.pagos, ctx),
-              ],
-            ),
-            const SizedBox(height: 20),
-            const Text(
-              'Ordenar por:',
-              style: TextStyle(fontWeight: FontWeight.w600),
-            ),
-            const SizedBox(height: 8),
-            Wrap(
-              spacing: 8,
-              runSpacing: 8,
-              children: [
-                _buildChipOrdenacaoModal(
-                  'Recentes',
-                  Ordenacao.recentes,
-                  Icons.access_time,
-                  ctx,
-                ),
-                _buildChipOrdenacaoModal(
-                  'A-Z',
-                  Ordenacao.alfabetica,
-                  Icons.sort_by_alpha,
-                  ctx,
-                ),
-                _buildChipOrdenacaoModal(
-                  'Maior valor',
-                  Ordenacao.maiorValor,
-                  Icons.arrow_upward,
-                  ctx,
-                ),
-                _buildChipOrdenacaoModal(
-                  'Menor valor',
-                  Ordenacao.menorValor,
-                  Icons.arrow_downward,
-                  ctx,
-                ),
-              ],
-            ),
-            const SizedBox(height: 16),
-          ],
-        ),
-      ),
-    );
-  }
-
-  Widget _buildChipOrdenacaoModal(
-    String label,
-    Ordenacao ordenacao,
-    IconData icon,
-    BuildContext ctx,
-  ) {
-    final isSelected = _ordenacao == ordenacao;
-    return FilterChip(
-      avatar: Icon(icon, size: 18),
-      label: Text(label),
-      selected: isSelected,
-      onSelected: (_) {
-        setState(() => _ordenacao = ordenacao);
-        Navigator.pop(ctx);
-      },
-    );
-  }
-
-  Widget _buildChipFiltroModal(
-    String label,
-    FiltroStatus filtro,
-    BuildContext ctx,
-  ) {
-    final isSelected = _filtroStatus == filtro;
-    return FilterChip(
-      label: Text(label),
-      selected: isSelected,
-      onSelected: (_) {
-        setState(() => _filtroStatus = filtro);
-        Navigator.pop(ctx);
-      },
-    );
-  }
-
-  /// Abre a tela de configurações
-  Future<void> _abrirConfiguracoes() async {
-    await Navigator.push(
-      context,
-      MaterialPageRoute(builder: (context) => const ConfiguracoesPage()),
-    );
-    if (mounted) await _carregarDados();
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return Scaffold(
-      appBar: AppBar(
-        title: const Text('Gastos Mensais'),
-        centerTitle: true,
-        elevation: 2,
-        actions: [
-          Stack(
-            children: [
-              IconButton(
-                icon: const Icon(Icons.filter_list),
-                tooltip: 'Filtros',
-                onPressed: _mostrarFiltros,
-              ),
-              if (_temFiltrosAtivos)
-                Positioned(
-                  right: 8,
-                  top: 8,
-                  child: Container(
-                    width: 8,
-                    height: 8,
-                    decoration: const BoxDecoration(
-                      color: Colors.red,
-                      shape: BoxShape.circle,
-                    ),
-                  ),
-                ),
-            ],
-          ),
-          IconButton(
-            icon: const Icon(Icons.settings),
-            tooltip: 'Configurações',
-            onPressed: _abrirConfiguracoes,
-          ),
-        ],
-      ),
-      body: Column(
-        children: [
-          _buildSeletorMesAno(),
-          _buildFormularioGasto(),
-          const Divider(height: 1),
-          if (_temFiltrosAtivos) _buildIndicadorFiltrosAtivos(),
-          Expanded(
-            child: _isLoading
-                ? const Center(child: CircularProgressIndicator())
-                : _buildListaGastos(),
-          ),
-          _buildTotalizador(),
-        ],
-      ),
-    );
-  }
-
-  void _handleMonthSwipe(DragEndDetails details) {
-    if (details.primaryVelocity != null && details.primaryVelocity! < -300) {
-      _proximoMes();
-    } else if (details.primaryVelocity != null &&
-        details.primaryVelocity! > 300) {
-      _mesAnterior();
-    }
-  }
-
-  Widget _buildIndicadorFiltrosAtivos() {
-    final List<String> filtrosAtivos = [];
-
-    if (_filtroStatus == FiltroStatus.abertos) {
-      filtrosAtivos.add('Em aberto');
-    } else if (_filtroStatus == FiltroStatus.pagos) {
-      filtrosAtivos.add('Pagos');
-    }
-
-    if (_ordenacao != Ordenacao.alfabetica) {
-      filtrosAtivos.add(_textoOrdenacao);
-    }
-
-    final texto = filtrosAtivos.join(' • ');
-
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-      color: Theme.of(
-        context,
-      ).colorScheme.primaryContainer.withValues(alpha: 0.3),
-      child: Row(
-        children: [
-          Icon(
-            Icons.filter_alt,
-            size: 18,
-            color: Theme.of(context).colorScheme.primary,
-          ),
-          const SizedBox(width: 8),
-          Expanded(
-            child: Text(
-              texto,
-              style: TextStyle(
-                color: Theme.of(context).colorScheme.primary,
-                fontWeight: FontWeight.w500,
-              ),
-            ),
-          ),
-          TextButton(
-            onPressed: () => setState(() {
-              _filtroStatus = FiltroStatus.todos;
-              _ordenacao = Ordenacao.alfabetica;
-            }),
-            child: const Text('Limpar'),
-          ),
-        ],
-      ),
-    );
-  }
-
-  Widget _buildSeletorMesAno() {
-    final anos = List.generate(8, (i) => DateTime.now().year - 5 + i);
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 12),
-      decoration: BoxDecoration(
-        color: Theme.of(context).colorScheme.surfaceContainerHighest,
-      ),
-      child: Column(
-        children: [
-          Row(
-            mainAxisAlignment: MainAxisAlignment.spaceBetween,
-            children: [
-              IconButton(
-                onPressed: _mesAnterior,
-                icon: const Icon(Icons.chevron_left),
-                tooltip: 'Mês anterior',
-                style: IconButton.styleFrom(
-                  backgroundColor: Theme.of(
-                    context,
-                  ).colorScheme.primaryContainer,
-                ),
-              ),
-              Expanded(
-                child: GestureDetector(
-                  onTap: () => _mostrarSeletorMesAno(anos),
-                  child: Container(
-                    padding: const EdgeInsets.symmetric(
-                      vertical: 12,
-                      horizontal: 16,
-                    ),
-                    margin: const EdgeInsets.symmetric(horizontal: 8),
-                    decoration: BoxDecoration(
-                      color: Theme.of(context).colorScheme.primaryContainer,
-                      borderRadius: BorderRadius.circular(12),
-                    ),
-                    child: Row(
-                      mainAxisAlignment: MainAxisAlignment.center,
-                      children: [
-                        const Icon(Icons.calendar_month, size: 20),
-                        const SizedBox(width: 8),
-                        Text(
-                          '${_nomesMeses[_mesSelecionado - 1]} $_anoSelecionado',
-                          style: Theme.of(context).textTheme.titleMedium
-                              ?.copyWith(fontWeight: FontWeight.bold),
-                        ),
-                        const SizedBox(width: 4),
-                        const Icon(Icons.arrow_drop_down, size: 20),
-                      ],
-                    ),
-                  ),
-                ),
-              ),
-              IconButton(
-                onPressed: _proximoMes,
-                icon: const Icon(Icons.chevron_right),
-                tooltip: 'Próximo mês',
-                style: IconButton.styleFrom(
-                  backgroundColor: Theme.of(
-                    context,
-                  ).colorScheme.primaryContainer,
-                ),
-              ),
-            ],
-          ),
-          if (!_isMesAtual) ...[
-            const SizedBox(height: 8),
-            TextButton.icon(
-              onPressed: _irParaMesAtual,
-              icon: const Icon(Icons.today, size: 18),
-              label: const Text('Ir para mês atual'),
-            ),
-          ],
-        ],
-      ),
-    );
-  }
-
-  void _mostrarSeletorMesAno(List<int> anos) {
-    int mesTmp = _mesSelecionado;
-    int anoTmp = _anoSelecionado;
-    showDialog(
-      context: context,
-      builder: (ctx) {
-        return StatefulBuilder(
-          builder: (ctx, setStateDialog) {
-            return AlertDialog(
-              title: const Text('Selecionar Período'),
-              content: Column(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  DropdownButtonFormField<int>(
-                    initialValue: mesTmp,
-                    decoration: const InputDecoration(
-                      labelText: 'Mês',
-                      border: OutlineInputBorder(),
-                    ),
-                    items: List.generate(
-                      12,
-                      (i) => DropdownMenuItem(
-                        value: i + 1,
-                        child: Text(_nomesMeses[i]),
-                      ),
-                    ),
-                    onChanged: (v) {
-                      if (v != null) setStateDialog(() => mesTmp = v);
-                    },
-                  ),
-                  const SizedBox(height: 16),
-                  DropdownButtonFormField<int>(
-                    initialValue: anoTmp,
-                    decoration: const InputDecoration(
-                      labelText: 'Ano',
-                      border: OutlineInputBorder(),
-                    ),
-                    items: anos
-                        .map(
-                          (a) => DropdownMenuItem(
-                            value: a,
-                            child: Text(a.toString()),
-                          ),
-                        )
-                        .toList(),
-                    onChanged: (v) {
-                      if (v != null) setStateDialog(() => anoTmp = v);
-                    },
-                  ),
-                ],
-              ),
-              actions: [
-                TextButton(
-                  onPressed: () => Navigator.pop(ctx),
-                  child: const Text('Cancelar'),
-                ),
-                FilledButton(
-                  onPressed: () {
-                    Navigator.pop(ctx);
-                    setState(() {
-                      _mesSelecionado = mesTmp;
-                      _anoSelecionado = anoTmp;
-                    });
-                    _salvarPreferenciasECarregar();
-                  },
-                  child: const Text('Confirmar'),
-                ),
-              ],
-            );
-          },
-        );
-      },
-    );
-  }
-
-  Widget _buildFormularioGasto() {
-    return Container(
-      padding: const EdgeInsets.fromLTRB(16, 14, 16, 16),
-      child: FilledButton.icon(
-        onPressed: _abrirModalAdicionarGasto,
-        icon: const Icon(Icons.add_circle_outline),
-        label: const Text('Adicionar gasto'),
-        style: FilledButton.styleFrom(
-          padding: const EdgeInsets.symmetric(vertical: 16, horizontal: 18),
-          shape: RoundedRectangleBorder(
-            borderRadius: BorderRadius.circular(18),
-          ),
-        ),
-      ),
-    );
-  }
-
-  Widget _buildListaGastos() {
-    final gastosFiltrados = _gastosFiltrados;
-    if (gastosFiltrados.isEmpty) {
-      String msg;
-      if (_filtroStatus == FiltroStatus.abertos) {
-        msg =
-            'Nenhum gasto em aberto em\n${_nomesMeses[_mesSelecionado - 1]} de $_anoSelecionado';
-      } else if (_filtroStatus == FiltroStatus.pagos) {
-        msg =
-            'Nenhum gasto pago em\n${_nomesMeses[_mesSelecionado - 1]} de $_anoSelecionado';
-      } else {
-        msg =
-            'Nenhum gasto registrado em\n${_nomesMeses[_mesSelecionado - 1]} de $_anoSelecionado';
-      }
-      return GestureDetector(
-        behavior: HitTestBehavior.opaque,
-        onHorizontalDragEnd: _handleMonthSwipe,
-        child: Center(
-          child: Column(
-            mainAxisAlignment: MainAxisAlignment.center,
-            children: [
-              Icon(
-                Icons.receipt_long_outlined,
-                size: 64,
-                color: Colors.grey[400],
-              ),
-              const SizedBox(height: 16),
-              Text(
-                msg,
-                textAlign: TextAlign.center,
-                style: TextStyle(fontSize: 16, color: Colors.grey[600]),
-              ),
-            ],
-          ),
-        ),
-      );
-    }
-
-    // Wrapper com indicador visual de scroll (sombras nas bordas)
-    return GestureDetector(
-      behavior: HitTestBehavior.opaque,
-      onHorizontalDragEnd: _handleMonthSwipe,
-      child: ShaderMask(
-        shaderCallback: (Rect bounds) {
-          return const LinearGradient(
-            begin: Alignment.topCenter,
-            end: Alignment.bottomCenter,
-            colors: [
-              Colors.transparent,
-              Colors.white,
-              Colors.white,
-              Colors.transparent,
-            ],
-            stops: [0.0, 0.03, 0.97, 1.0],
-          ).createShader(bounds);
-        },
-        blendMode: BlendMode.dstIn,
-        child: Scrollbar(
-          thumbVisibility: true,
-          child: ListView.builder(
-            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 8),
-            itemCount: gastosFiltrados.length,
-            itemBuilder: (_, i) => _buildGastoCard(gastosFiltrados[i]),
-          ),
-        ),
-      ),
-    );
-  }
-
-  Widget _buildGastoCard(Gasto gasto) {
-    final isPago = gasto.pago;
-    final vencido = gasto.vencidoEm(DateTime.now());
-    final corStatus = isPago
-        ? Colors.green
-        : vencido
-        ? Colors.red
-        : Colors.orange;
-    return Card(
-      margin: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-      color: isPago
-          ? Theme.of(
-              context,
-            ).colorScheme.surfaceContainerHighest.withValues(alpha: 0.5)
-          : vencido
-          ? Theme.of(context).colorScheme.errorContainer.withValues(alpha: 0.35)
-          : null,
-      child: InkWell(
-        onLongPress: () => _editarGasto(gasto),
-        borderRadius: BorderRadius.circular(12),
-        child: ListTile(
-          leading: CircleAvatar(
-            backgroundColor: corStatus.withValues(alpha: 0.2),
-            child: Icon(
-              isPago
-                  ? Icons.paid_outlined
-                  : vencido
-                  ? Icons.warning_amber_rounded
-                  : Icons.receipt_long_outlined,
-              color: corStatus,
-            ),
-          ),
-          title: Text(
-            gasto.origem,
-            style: TextStyle(
-              fontWeight: FontWeight.w600,
-              decoration: isPago ? TextDecoration.lineThrough : null,
-              color: isPago ? Colors.grey : null,
-            ),
-          ),
-          subtitle: Text(
-            '${_currencyFormat.format(gasto.valor)}${gasto.vencimento == null ? '' : '\n${vencido
-                      ? 'Vencido desde'
-                      : isPago
-                      ? 'Vencimento'
-                      : 'Vence em'} ${DateFormat('dd/MM/yyyy').format(gasto.vencimento!)}'}',
-            style: TextStyle(
-              fontSize: 16,
-              fontWeight: isPago ? FontWeight.normal : FontWeight.bold,
-              color: isPago ? Colors.grey : Colors.red[400],
-              decoration: isPago ? TextDecoration.lineThrough : null,
-            ),
-          ),
-          trailing: Row(
+        builder: (ctx, change) => AlertDialog(
+          title: const Text('Selecionar período'),
+          content: Column(
             mainAxisSize: MainAxisSize.min,
             children: [
-              IconButton(
-                icon: const Icon(Icons.edit_outlined, size: 20),
-                color: Theme.of(context).colorScheme.primary,
-                onPressed: () => _editarGasto(gasto),
-                tooltip: 'Editar',
-              ),
-              Checkbox(
-                value: isPago,
-                onChanged: (_) => _togglePago(gasto),
-                activeColor: Colors.green,
-              ),
-              IconButton(
-                icon: const Icon(Icons.delete_outline, size: 20),
-                color: Colors.red[400],
-                onPressed: () => _confirmarExclusao(gasto),
-                tooltip: 'Excluir',
-              ),
-            ],
-          ),
-        ),
-      ),
-    );
-  }
-
-  Future<void> _abrirResumoDoMes() async {
-    final gastosEmAberto = _gastos.where((gasto) => !gasto.pago).toList();
-    final gastosPagos = _gastos.where((gasto) => gasto.pago).toList();
-    final totalPago = gastosPagos.fold<double>(
-      0,
-      (total, gasto) => total + gasto.valor,
-    );
-
-    await showModalBottomSheet<void>(
-      context: context,
-      isScrollControlled: true,
-      backgroundColor: Colors.transparent,
-      builder: (ctx) {
-        final colorScheme = Theme.of(ctx).colorScheme;
-        final textTheme = Theme.of(ctx).textTheme;
-
-        return FractionallySizedBox(
-          heightFactor: 0.82,
-          child: Container(
-            decoration: BoxDecoration(
-              color: colorScheme.surface,
-              borderRadius: const BorderRadius.vertical(
-                top: Radius.circular(28),
-              ),
-            ),
-            child: SafeArea(
-              top: false,
-              child: Column(
+              Row(
+                mainAxisAlignment: MainAxisAlignment.spaceBetween,
                 children: [
-                  const SizedBox(height: 12),
-                  Container(
-                    width: 44,
-                    height: 5,
-                    decoration: BoxDecoration(
-                      color: colorScheme.outlineVariant,
-                      borderRadius: BorderRadius.circular(999),
+                  IconButton(
+                    tooltip: 'Ano anterior',
+                    onPressed: year > 2000 ? () => change(() => year--) : null,
+                    icon: const Icon(Icons.chevron_left),
+                  ),
+                  Text(
+                    '$year',
+                    style: const TextStyle(
+                      fontSize: 18,
+                      fontWeight: FontWeight.w700,
                     ),
                   ),
-                  Expanded(
-                    child: ListView(
-                      padding: const EdgeInsets.fromLTRB(20, 18, 20, 24),
-                      children: [
-                        Row(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            Container(
-                              padding: const EdgeInsets.all(12),
-                              decoration: BoxDecoration(
-                                color: colorScheme.primaryContainer,
-                                borderRadius: BorderRadius.circular(16),
-                              ),
-                              child: Icon(
-                                Icons.insights_outlined,
-                                color: colorScheme.onPrimaryContainer,
-                              ),
-                            ),
-                            const SizedBox(width: 12),
-                            Expanded(
-                              child: Column(
-                                crossAxisAlignment: CrossAxisAlignment.start,
-                                children: [
-                                  Text(
-                                    'Resumo do mês',
-                                    style: textTheme.titleLarge?.copyWith(
-                                      fontWeight: FontWeight.w700,
-                                    ),
-                                  ),
-                                  const SizedBox(height: 2),
-                                  Text(
-                                    '${_nomesMeses[_mesSelecionado - 1]} de $_anoSelecionado',
-                                    style: textTheme.bodyMedium?.copyWith(
-                                      color: colorScheme.onSurfaceVariant,
-                                    ),
-                                  ),
-                                ],
-                              ),
-                            ),
-                          ],
-                        ),
-                        const SizedBox(height: 20),
-                        GridView.count(
-                          crossAxisCount: 2,
-                          shrinkWrap: true,
-                          physics: const NeverScrollableScrollPhysics(),
-                          mainAxisSpacing: 12,
-                          crossAxisSpacing: 12,
-                          childAspectRatio: 1.35,
-                          children: [
-                            _buildResumoCard(
-                              ctx,
-                              titulo: 'Em aberto',
-                              valor: _currencyFormat.format(_totalEmAberto),
-                              icone: Icons.pending_actions_outlined,
-                              destaque: Colors.red[400]!,
-                            ),
-                            _buildResumoCard(
-                              ctx,
-                              titulo: 'Pagos',
-                              valor: _currencyFormat.format(totalPago),
-                              icone: Icons.paid_outlined,
-                              destaque: Colors.green[400]!,
-                            ),
-                            _buildResumoCard(
-                              ctx,
-                              titulo: 'Itens em aberto',
-                              valor: gastosEmAberto.length.toString(),
-                              icone: Icons.receipt_long_outlined,
-                              destaque: colorScheme.primary,
-                            ),
-                            _buildResumoCard(
-                              ctx,
-                              titulo: 'Itens pagos',
-                              valor: gastosPagos.length.toString(),
-                              icone: Icons.task_alt_outlined,
-                              destaque: colorScheme.secondary,
-                            ),
-                          ],
-                        ),
-                        if (_totaisPorOrigem.isNotEmpty) ...[
-                          const SizedBox(height: 24),
-                          Text(
-                            'Em aberto por origem',
-                            style: textTheme.titleMedium?.copyWith(
-                              fontWeight: FontWeight.w700,
-                            ),
-                          ),
-                          const SizedBox(height: 12),
-                          ..._totaisPorOrigem.entries.map((entry) {
-                            return Container(
-                              margin: const EdgeInsets.only(bottom: 10),
-                              padding: const EdgeInsets.symmetric(
-                                horizontal: 14,
-                                vertical: 12,
-                              ),
-                              decoration: BoxDecoration(
-                                color: colorScheme.surfaceContainerHighest,
-                                borderRadius: BorderRadius.circular(16),
-                              ),
-                              child: Row(
-                                children: [
-                                  Expanded(
-                                    child: Text(
-                                      entry.key,
-                                      style: textTheme.titleSmall?.copyWith(
-                                        fontWeight: FontWeight.w600,
-                                      ),
-                                    ),
-                                  ),
-                                  const SizedBox(width: 12),
-                                  Text(
-                                    _currencyFormat.format(entry.value),
-                                    style: textTheme.titleSmall?.copyWith(
-                                      fontWeight: FontWeight.w700,
-                                      color: Colors.red[400],
-                                    ),
-                                  ),
-                                ],
-                              ),
-                            );
-                          }),
-                        ],
-                        const SizedBox(height: 24),
-                        Text(
-                          'Lançamentos do mês',
-                          style: textTheme.titleMedium?.copyWith(
-                            fontWeight: FontWeight.w700,
-                          ),
-                        ),
-                        const SizedBox(height: 12),
-                        if (_gastos.isEmpty)
-                          Container(
-                            padding: const EdgeInsets.all(18),
-                            decoration: BoxDecoration(
-                              color: colorScheme.surfaceContainerHighest,
-                              borderRadius: BorderRadius.circular(18),
-                            ),
-                            child: Text(
-                              'Nenhum lançamento encontrado neste mês.',
-                              style: textTheme.bodyMedium?.copyWith(
-                                color: colorScheme.onSurfaceVariant,
-                              ),
-                            ),
-                          )
-                        else
-                          ..._gastos.map((gasto) {
-                            final corStatus = gasto.pago
-                                ? Colors.green
-                                : Colors.orange;
-                            final textoStatus = gasto.pago
-                                ? 'Pago'
-                                : 'Em aberto';
-                            return Container(
-                              margin: const EdgeInsets.only(bottom: 10),
-                              padding: const EdgeInsets.all(14),
-                              decoration: BoxDecoration(
-                                color: colorScheme.surfaceContainerHighest,
-                                borderRadius: BorderRadius.circular(18),
-                              ),
-                              child: Row(
-                                children: [
-                                  Container(
-                                    width: 10,
-                                    height: 10,
-                                    decoration: BoxDecoration(
-                                      color: corStatus,
-                                      shape: BoxShape.circle,
-                                    ),
-                                  ),
-                                  const SizedBox(width: 12),
-                                  Expanded(
-                                    child: Column(
-                                      crossAxisAlignment:
-                                          CrossAxisAlignment.start,
-                                      children: [
-                                        Text(
-                                          gasto.origem,
-                                          style: textTheme.titleSmall?.copyWith(
-                                            fontWeight: FontWeight.w700,
-                                          ),
-                                        ),
-                                        const SizedBox(height: 2),
-                                        Text(
-                                          textoStatus,
-                                          style: textTheme.bodySmall?.copyWith(
-                                            color: colorScheme.onSurfaceVariant,
-                                          ),
-                                        ),
-                                      ],
-                                    ),
-                                  ),
-                                  const SizedBox(width: 12),
-                                  Text(
-                                    _currencyFormat.format(gasto.valor),
-                                    style: textTheme.titleSmall?.copyWith(
-                                      fontWeight: FontWeight.w700,
-                                      color: gasto.pago
-                                          ? Colors.green[400]
-                                          : Colors.red[400],
-                                    ),
-                                  ),
-                                ],
-                              ),
-                            );
-                          }),
-                      ],
-                    ),
+                  IconButton(
+                    tooltip: 'Próximo ano',
+                    onPressed: year < 2100 ? () => change(() => year++) : null,
+                    icon: const Icon(Icons.chevron_right),
                   ),
                 ],
               ),
-            ),
+              Wrap(
+                spacing: 6,
+                children: List.generate(
+                  12,
+                  (i) => ChoiceChip(
+                    label: Text(_months[i].substring(0, 3)),
+                    selected: month == i + 1,
+                    onSelected: (_) => change(() => month = i + 1),
+                  ),
+                ),
+              ),
+            ],
           ),
-        );
-      },
-    );
-  }
-
-  Widget _buildResumoCard(
-    BuildContext context, {
-    required String titulo,
-    required String valor,
-    required IconData icone,
-    required Color destaque,
-  }) {
-    final colorScheme = Theme.of(context).colorScheme;
-    final textTheme = Theme.of(context).textTheme;
-
-    return Container(
-      padding: const EdgeInsets.all(16),
-      decoration: BoxDecoration(
-        color: colorScheme.surfaceContainerHighest,
-        borderRadius: BorderRadius.circular(20),
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        mainAxisAlignment: MainAxisAlignment.spaceBetween,
-        children: [
-          Icon(icone, color: destaque, size: 24),
-          const SizedBox(height: 12),
-          Text(
-            titulo,
-            style: textTheme.bodyMedium?.copyWith(
-              color: colorScheme.onSurfaceVariant,
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(ctx, false),
+              child: const Text('Cancelar'),
             ),
-          ),
-          const SizedBox(height: 4),
-          Text(
-            valor,
-            maxLines: 2,
-            overflow: TextOverflow.ellipsis,
-            style: textTheme.titleMedium?.copyWith(
-              fontWeight: FontWeight.w800,
-              color: destaque,
+            FilledButton(
+              onPressed: () => Navigator.pop(ctx, true),
+              child: const Text('Aplicar'),
             ),
-          ),
-        ],
+          ],
+        ),
       ),
     );
+    if (confirmed == true && mounted) {
+      await _changePeriod(DateTime(year, month));
+    }
   }
 
-  Widget _buildTotalizador() {
-    return Container(
-      width: double.infinity,
-      decoration: BoxDecoration(
-        color: Theme.of(context).colorScheme.surfaceContainerHighest,
-        boxShadow: [
-          BoxShadow(
-            color: Colors.black.withValues(alpha: 0.2),
-            blurRadius: 8,
-            offset: const Offset(0, -2),
-          ),
-        ],
-      ),
-      child: SafeArea(
-        top: false,
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
+  void _summary() {
+    final total = _expenses.fold<double>(0, (v, g) => v + g.valor);
+    final grouped = <String, double>{};
+    for (final g in _expenses) {
+      grouped.update(g.origem, (v) => v + g.valor, ifAbsent: () => g.valor);
+    }
+    final entries = grouped.entries.toList()
+      ..sort((a, b) => b.value.compareTo(a.value));
+    showModalBottomSheet<void>(
+      context: context,
+      isScrollControlled: true,
+      useSafeArea: true,
+      builder: (ctx) => DraggableScrollableSheet(
+        expand: false,
+        initialChildSize: 0.72,
+        minChildSize: 0.35,
+        maxChildSize: 0.92,
+        builder: (ctx, scroll) => ListView(
+          controller: scroll,
+          padding: const EdgeInsets.fromLTRB(24, 0, 24, 24),
           children: [
-            InkWell(
-              onTap: _abrirResumoDoMes,
-              child: Container(
-                width: double.infinity,
-                padding: const EdgeInsets.symmetric(vertical: 10),
-                child: Row(
-                  mainAxisAlignment: MainAxisAlignment.center,
+            const Text(
+              'Resumo do mês',
+              style: TextStyle(fontSize: 24, fontWeight: FontWeight.w700),
+            ),
+            const SizedBox(height: 6),
+            Text(
+              _periodLabel,
+              style: const TextStyle(color: FinanceColors.muted),
+            ),
+            const SizedBox(height: 20),
+            MonthlyOverview(
+              gastos: _expenses,
+              onDetails: () => Navigator.pop(ctx),
+            ),
+            const FinanceSection(
+              title: 'Distribuição por origem',
+              subtitle: 'Valores pagos e em aberto no período',
+            ),
+            if (entries.isEmpty)
+              const Text('Adicione um lançamento para ver a distribuição.'),
+            ...entries.map(
+              (e) => Padding(
+                padding: const EdgeInsets.only(bottom: 20),
+                child: Column(
                   children: [
-                    Icon(
-                      Icons.insights_outlined,
-                      size: 18,
-                      color: Theme.of(
-                        context,
-                      ).colorScheme.onSurface.withValues(alpha: 0.6),
+                    Row(
+                      children: [
+                        Expanded(
+                          child: Text(
+                            e.key,
+                            style: const TextStyle(fontWeight: FontWeight.w600),
+                          ),
+                        ),
+                        Text(money(e.value)),
+                      ],
                     ),
-                    const SizedBox(width: 6),
-                    Text(
-                      'Ver resumo do mês',
-                      style: TextStyle(
-                        fontSize: 12,
-                        color: Theme.of(
-                          context,
-                        ).colorScheme.onSurface.withValues(alpha: 0.5),
-                      ),
+                    const SizedBox(height: 8),
+                    LinearProgressIndicator(
+                      value: total == 0 ? 0 : e.value / total,
+                      minHeight: 5,
+                      color: FinanceColors.ink,
+                      backgroundColor: FinanceColors.line,
+                      borderRadius: BorderRadius.circular(5),
                     ),
                   ],
                 ),
               ),
             ),
-            Padding(
-              padding: const EdgeInsets.only(left: 16, right: 16, bottom: 8),
-              child: Row(
-                mainAxisAlignment: MainAxisAlignment.center,
-                children: [
-                  Icon(
-                    Icons.account_balance_wallet,
-                    size: 20,
-                    color: Theme.of(context).colorScheme.primary,
-                  ),
-                  const SizedBox(width: 8),
-                  Text(
-                    'Total: ',
-                    style: TextStyle(
-                      fontSize: 14,
-                      color: Theme.of(
-                        context,
-                      ).colorScheme.onSurface.withValues(alpha: 0.7),
-                    ),
-                  ),
-                  Text(
-                    _currencyFormat.format(_totalEmAberto),
-                    style: TextStyle(
-                      fontSize: 18,
-                      fontWeight: FontWeight.bold,
-                      color: _totalEmAberto > 0
-                          ? Colors.red[400]
-                          : Colors.green[400],
-                    ),
-                  ),
-                ],
-              ),
-            ),
           ],
         ),
       ),
     );
   }
+
+  Future<void> _settings() async {
+    await Navigator.push(
+      context,
+      MaterialPageRoute<void>(builder: (_) => const ConfiguracoesPage()),
+    );
+    if (mounted) await _load();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final visible = _filtered;
+    final overview = _tab == 0;
+    final overdue = _expenses.where((g) => g.vencidoEm(_now)).toList();
+    return Scaffold(
+      appBar: AppBar(
+        leading: const Icon(Icons.account_balance_outlined, size: 22),
+        leadingWidth: 48,
+        titleSpacing: 0,
+        title: const Text('FinanTech'),
+        actions: [
+          IconButton.filled(
+            tooltip: 'Adicionar gasto',
+            onPressed: _saving ? null : () => _edit(),
+            icon: _saving
+                ? const SizedBox(
+                    width: 18,
+                    height: 18,
+                    child: CircularProgressIndicator(
+                      strokeWidth: 2,
+                      color: Colors.white,
+                    ),
+                  )
+                : const Icon(Icons.add),
+          ),
+          IconButton(
+            tooltip: 'Ajustes',
+            onPressed: _settings,
+            icon: const Icon(Icons.tune_outlined),
+          ),
+          const SizedBox(width: 8),
+        ],
+      ),
+      bottomNavigationBar: NavigationBar(
+        selectedIndex: _tab,
+        onDestinationSelected: (i) {
+          if (i == 2) {
+            _settings();
+          } else {
+            setState(() {
+              _tab = i;
+              _filter = FiltroStatus.todos;
+              _search.clear();
+            });
+          }
+        },
+        destinations: const [
+          NavigationDestination(
+            icon: Icon(Icons.space_dashboard_outlined),
+            selectedIcon: Icon(Icons.space_dashboard),
+            label: 'Visão geral',
+          ),
+          NavigationDestination(
+            icon: Icon(Icons.receipt_long_outlined),
+            selectedIcon: Icon(Icons.receipt_long),
+            label: 'Lançamentos',
+          ),
+          NavigationDestination(
+            icon: Icon(Icons.tune_outlined),
+            label: 'Ajustes',
+          ),
+        ],
+      ),
+      body: RefreshIndicator(
+        onRefresh: _load,
+        child: LayoutBuilder(
+          builder: (context, constraints) => Align(
+            alignment: Alignment.topCenter,
+            child: ConstrainedBox(
+              constraints: const BoxConstraints(maxWidth: 680),
+              child: CustomScrollView(
+                physics: const AlwaysScrollableScrollPhysics(),
+                slivers: [
+                  SliverPadding(
+                    padding: const EdgeInsets.fromLTRB(20, 12, 20, 0),
+                    sliver: SliverList.list(
+                      children: [
+                        Text(
+                          overview ? 'Suas contas, em dia.' : 'Lançamentos',
+                          style: const TextStyle(
+                            fontSize: 28,
+                            fontWeight: FontWeight.w700,
+                            letterSpacing: -0.9,
+                          ),
+                        ),
+                        const SizedBox(height: 6),
+                        Text(
+                          overview
+                              ? 'Uma visão clara do seu mês.'
+                              : 'Acompanhe cada conta e pagamento.',
+                          style: const TextStyle(
+                            color: FinanceColors.muted,
+                            fontSize: 14,
+                          ),
+                        ),
+                        const SizedBox(height: 22),
+                        Row(
+                          children: [
+                            Expanded(
+                              child: OutlinedButton.icon(
+                                onPressed: _selectPeriod,
+                                icon: const Icon(
+                                  Icons.calendar_today_outlined,
+                                  size: 16,
+                                ),
+                                label: Text(_periodLabel),
+                              ),
+                            ),
+                            const SizedBox(width: 8),
+                            IconButton(
+                              tooltip: 'Mês anterior',
+                              onPressed: () => _changePeriod(
+                                DateTime(_period.year, _period.month - 1),
+                              ),
+                              icon: const Icon(Icons.chevron_left),
+                            ),
+                            IconButton(
+                              tooltip: 'Próximo mês',
+                              onPressed: () => _changePeriod(
+                                DateTime(_period.year, _period.month + 1),
+                              ),
+                              icon: const Icon(Icons.chevron_right),
+                            ),
+                          ],
+                        ),
+                        if (_period.month != _now.month ||
+                            _period.year != _now.year)
+                          Align(
+                            alignment: Alignment.centerLeft,
+                            child: TextButton(
+                              onPressed: () => _changePeriod(
+                                DateTime(_now.year, _now.month),
+                              ),
+                              child: const Text('Voltar ao mês atual'),
+                            ),
+                          ),
+                        const SizedBox(height: 16),
+                        if (_loading)
+                          const Padding(
+                            padding: EdgeInsets.all(40),
+                            child: Center(child: CircularProgressIndicator()),
+                          )
+                        else if (_error != null)
+                          FinanceEmptyState(
+                            title: 'Não foi possível carregar',
+                            message: _error!,
+                            action: 'Tentar novamente',
+                            onAction: _load,
+                          )
+                        else ...[
+                          if (overview) ...[
+                            MonthlyOverview(
+                              gastos: _expenses,
+                              onDetails: _summary,
+                            ),
+                            if (overdue.isNotEmpty)
+                              Padding(
+                                padding: const EdgeInsets.only(top: 16),
+                                child: Material(
+                                  color: const Color(0xFFFFF1F0),
+                                  borderRadius: BorderRadius.circular(12),
+                                  child: ListTile(
+                                    onTap: () => setState(() {
+                                      _tab = 1;
+                                      _filter = FiltroStatus.vencidos;
+                                      _search.clear();
+                                    }),
+                                    leading: const Icon(
+                                      Icons.error_outline,
+                                      color: FinanceColors.red,
+                                    ),
+                                    title: Text(
+                                      '${overdue.length} ${overdue.length == 1 ? 'conta vencida' : 'contas vencidas'}',
+                                      style: const TextStyle(
+                                        fontSize: 14,
+                                        fontWeight: FontWeight.w600,
+                                        color: FinanceColors.red,
+                                      ),
+                                    ),
+                                    subtitle: Text(
+                                      '${money(overdue.fold<double>(0, (v, g) => v + g.valor))} para regularizar',
+                                      style: const TextStyle(
+                                        fontSize: 12,
+                                        color: FinanceColors.red,
+                                      ),
+                                    ),
+                                    trailing: const Icon(
+                                      Icons.chevron_right,
+                                      color: FinanceColors.red,
+                                    ),
+                                  ),
+                                ),
+                              ),
+                          ],
+                          FinanceSection(
+                            title: overview
+                                ? 'Contas do mês'
+                                : 'Seus lançamentos',
+                            subtitle:
+                                '${visible.length} ${visible.length == 1 ? 'lançamento' : 'lançamentos'}',
+                            action: overview
+                                ? TextButton(
+                                    onPressed: () => setState(() => _tab = 1),
+                                    child: const Text('Ver todas'),
+                                  )
+                                : null,
+                          ),
+                          if (!overview) ...[
+                            TextField(
+                              controller: _search,
+                              onChanged: (_) => setState(() {}),
+                              decoration: const InputDecoration(
+                                hintText: 'Buscar por nome ou instituição',
+                                prefixIcon: Icon(Icons.search),
+                              ),
+                            ),
+                            const SizedBox(height: 14),
+                            SingleChildScrollView(
+                              scrollDirection: Axis.horizontal,
+                              child: Row(
+                                children: FiltroStatus.values
+                                    .map(
+                                      (f) => Padding(
+                                        padding: const EdgeInsets.only(
+                                          right: 8,
+                                        ),
+                                        child: ChoiceChip(
+                                          label: Text(switch (f) {
+                                            FiltroStatus.todos => 'Todas',
+                                            FiltroStatus.abertos => 'Em aberto',
+                                            FiltroStatus.pagos => 'Pagas',
+                                            FiltroStatus.vencidos => 'Vencidas',
+                                          }),
+                                          selected: _filter == f,
+                                          onSelected: (_) =>
+                                              setState(() => _filter = f),
+                                        ),
+                                      ),
+                                    )
+                                    .toList(),
+                              ),
+                            ),
+                            Align(
+                              alignment: Alignment.centerRight,
+                              child: PopupMenuButton<Ordenacao>(
+                                tooltip: 'Ordenar lançamentos',
+                                initialValue: _order,
+                                onSelected: (o) => setState(() => _order = o),
+                                itemBuilder: (_) => Ordenacao.values
+                                    .map(
+                                      (o) => PopupMenuItem(
+                                        value: o,
+                                        child: Text(_orderLabel(o)),
+                                      ),
+                                    )
+                                    .toList(),
+                                child: Padding(
+                                  padding: const EdgeInsets.symmetric(
+                                    vertical: 16,
+                                  ),
+                                  child: Row(
+                                    mainAxisSize: MainAxisSize.min,
+                                    children: [
+                                      const Icon(Icons.sort, size: 17),
+                                      const SizedBox(width: 6),
+                                      Text(
+                                        _orderLabel(_order),
+                                        style: const TextStyle(
+                                          fontSize: 12,
+                                          fontWeight: FontWeight.w600,
+                                        ),
+                                      ),
+                                      const SizedBox(width: 4),
+                                      const Icon(Icons.expand_more, size: 17),
+                                    ],
+                                  ),
+                                ),
+                              ),
+                            ),
+                          ],
+                        ],
+                      ],
+                    ),
+                  ),
+                  if (!_loading && _error == null)
+                    SliverPadding(
+                      padding: const EdgeInsets.symmetric(horizontal: 20),
+                      sliver: visible.isEmpty
+                          ? SliverToBoxAdapter(
+                              child: FinanceEmptyState(
+                                title: _expenses.isEmpty
+                                    ? 'Seu mês começa aqui'
+                                    : 'Nenhuma conta encontrada',
+                                message: _expenses.isEmpty
+                                    ? 'Adicione sua primeira conta para acompanhar valores e vencimentos.'
+                                    : 'Tente outro nome ou altere os filtros.',
+                                action: _expenses.isEmpty
+                                    ? 'Adicionar primeira conta'
+                                    : 'Limpar filtros',
+                                onAction: _expenses.isEmpty
+                                    ? () => _edit()
+                                    : () => setState(() {
+                                        _search.clear();
+                                        _filter = FiltroStatus.todos;
+                                      }),
+                              ),
+                            )
+                          : SliverList.builder(
+                              itemCount: overview
+                                  ? visible.length.clamp(0, 5)
+                                  : visible.length,
+                              itemBuilder: (context, i) => Container(
+                                decoration: BoxDecoration(
+                                  color: Colors.white,
+                                  border: Border(
+                                    bottom: const BorderSide(
+                                      color: FinanceColors.line,
+                                    ),
+                                    left: const BorderSide(
+                                      color: FinanceColors.line,
+                                    ),
+                                    right: const BorderSide(
+                                      color: FinanceColors.line,
+                                    ),
+                                    top: i == 0
+                                        ? const BorderSide(
+                                            color: FinanceColors.line,
+                                          )
+                                        : BorderSide.none,
+                                  ),
+                                ),
+                                child: ExpenseRow(
+                                  gasto: visible[i],
+                                  now: _now,
+                                  onEdit: () => _edit(visible[i]),
+                                  onPay: () => _pay(visible[i]),
+                                  onDelete: () => _delete(visible[i]),
+                                ),
+                              ),
+                            ),
+                    ),
+                  const SliverToBoxAdapter(child: SizedBox(height: 104)),
+                ],
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  String _orderLabel(Ordenacao order) => switch (order) {
+    Ordenacao.vencimento => 'Por vencimento',
+    Ordenacao.alfabetica => 'Nome de A a Z',
+    Ordenacao.maiorValor => 'Maior valor',
+    Ordenacao.menorValor => 'Menor valor',
+    Ordenacao.recentes => 'Mais recentes',
+  };
 }
