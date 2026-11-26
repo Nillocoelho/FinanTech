@@ -13,7 +13,16 @@ class BackupDocument {
   static bool _integer(Object? value, int min, int max) =>
       value is int && value >= min && value <= max;
   static bool _amount(Object? value) =>
-      value is num && value.isFinite && value > 0;
+      value is num && value.isFinite && (value * 100).round() > 0;
+  /// Backups até a versão 1.2 têm só `valor` (reais); os novos trazem também
+  /// `valorCentavos`, que tem prioridade na leitura.
+  static bool _valor(Map<String, dynamic> row) {
+    final centavos = row['valorCentavos'];
+    if (centavos == null) return _amount(row['valor']);
+    return _integer(centavos, 1, 99999999999) &&
+        (row['valor'] == null || _amount(row['valor']));
+  }
+
   static Never _invalid() => throw const FormatException(
     'O backup contém dados inválidos ou incompletos.',
   );
@@ -21,7 +30,7 @@ class BackupDocument {
   factory BackupDocument.decode(String content) {
     final data = jsonDecode(content);
     if (data is! Map ||
-        data['app'] != 'FinanTech' ||
+        !const ['FinanTech', 'Quitora', 'Diazen'].contains(data['app']) ||
         (data['version'] != 1 && data['version'] != 2) ||
         data['gastos'] is! List ||
         (data['version'] == 2 && data['recorrencias'] is! List)) {
@@ -34,7 +43,7 @@ class BackupDocument {
           !_text(row['id']) ||
           !_text(row['origem']) ||
           !_text(row['categoria']) ||
-          !_amount(row['valor']) ||
+          !_valor(row) ||
           !_integer(
             row['inicioMes'],
             monthIndex(2000, 1),
@@ -62,7 +71,7 @@ class BackupDocument {
       if (row is! Map<String, dynamic> ||
           !_integer(row['id'], 1, 0x7fffffff) ||
           !_text(row['origem']) ||
-          !_amount(row['valor']) ||
+          !_valor(row) ||
           !_integer(row['mes'], 1, 12) ||
           !_integer(row['ano'], 2000, 2100) ||
           !_integer(row['pago'], 0, 1) ||
@@ -109,6 +118,8 @@ class BackupDocument {
   }
 
   String encode() => jsonEncode({
+    // Identificador do formato (mantido após a troca de nome do app para que
+    // versões anteriores continuem lendo os backups novos).
     'app': 'FinanTech',
     'version': 2,
     'createdAt': DateTime.now().toIso8601String(),

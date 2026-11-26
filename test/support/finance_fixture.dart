@@ -152,15 +152,15 @@ class PreviewRepository extends GastosRepository {
   ) async {
     final index = expenses.indexWhere(
       (g) =>
+          !g.pago &&
           g.origem.toLowerCase() == gasto.origem.toLowerCase() &&
           g.mes == gasto.mes &&
           g.ano == gasto.ano,
     );
     if (index >= 0) {
       final updated = expenses[index].copyWith(
-        valor: expenses[index].valor + gasto.valor,
+        valorCentavos: expenses[index].valorCentavos + gasto.valorCentavos,
         vencimento: gasto.vencimento,
-        pago: false,
       );
       expenses[index] = updated;
       return (somado: true, gasto: updated);

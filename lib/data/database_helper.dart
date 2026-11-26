@@ -10,7 +10,7 @@ class DatabaseHelper {
   static const String _databaseName = 'finantech.db';
 
   // Versão do banco (incrementar quando houver mudanças na estrutura)
-  static const int _databaseVersion = 3;
+  static const int _databaseVersion = 4;
 
   // Nome da tabela de gastos
   static const String tableGastos = 'gastos';
@@ -64,6 +64,7 @@ class DatabaseHelper {
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         origem TEXT NOT NULL,
         valor REAL NOT NULL,
+        valorCentavos INTEGER NOT NULL DEFAULT 0,
         pago INTEGER NOT NULL DEFAULT 0,
         mes INTEGER NOT NULL,
         ano INTEGER NOT NULL,
@@ -87,6 +88,7 @@ class DatabaseHelper {
       CREATE INDEX idx_gastos_origem ON $tableGastos (origem)
     ''');
     await _createPlanningTables(db);
+    await _createVencimentoIndex(db);
   }
 
   /// Callback executado quando a versão do banco é atualizada
@@ -108,18 +110,35 @@ class DatabaseHelper {
       ]) {
         await db.execute('ALTER TABLE gastos ADD COLUMN $column');
       }
-      await _createPlanningTables(db);
+      await _createPlanningTables(db, comCentavos: false);
     }
-    // Implementar migrações futuras aqui se necessário
-    // Exemplo:
-    // if (oldVersion < 2) {
-    //   await db.execute('ALTER TABLE gastos ADD COLUMN nova_coluna TEXT');
-    // }
+    if (oldVersion < 4) {
+      // Dinheiro passa a ser gravado em centavos inteiros. A coluna `valor`
+      // (REAL) continua sendo escrita para permitir voltar a uma versão antiga.
+      for (final table in [tableGastos, tableRecorrencias]) {
+        await db.execute(
+          'ALTER TABLE $table ADD COLUMN valorCentavos INTEGER NOT NULL DEFAULT 0',
+        );
+        await db.execute(
+          'UPDATE $table SET valorCentavos = CAST(ROUND(valor * 100) AS INTEGER)',
+        );
+      }
+      await _createVencimentoIndex(db);
+    }
   }
 
-  Future<void> _createPlanningTables(Database db) async {
+  /// Acelera a consulta dos próximos vencimentos usada pelos lembretes.
+  Future<void> _createVencimentoIndex(Database db) => db.execute(
+    'CREATE INDEX IF NOT EXISTS idx_gastos_vencimento ON $tableGastos (pago, vencimento)',
+  );
+
+  Future<void> _createPlanningTables(
+    Database db, {
+    bool comCentavos = true,
+  }) async {
     await db.execute('''CREATE TABLE recorrencias (
       id TEXT PRIMARY KEY, origem TEXT NOT NULL, valor REAL NOT NULL,
+      ${comCentavos ? 'valorCentavos INTEGER NOT NULL DEFAULT 0,' : ''}
       categoria TEXT NOT NULL, inicioMes INTEGER NOT NULL,
       proximoMes INTEGER NOT NULL, diaVencimento INTEGER NOT NULL,
       deslocamentoVencimento INTEGER NOT NULL, ativo INTEGER NOT NULL DEFAULT 1

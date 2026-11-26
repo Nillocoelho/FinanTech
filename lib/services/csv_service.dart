@@ -1,277 +1,376 @@
-import 'dart:io';
 import 'dart:convert';
+import 'dart:io';
+
 import 'package:path_provider/path_provider.dart';
+import 'package:sqflite/sqflite.dart';
+
+import '../data/database_helper.dart';
 import '../data/gastos_repository.dart';
 import '../models/gasto.dart';
+import '../utils/currency_helper.dart';
+import 'backup_service.dart';
+
+/// Resultado de uma importação de CSV.
+class ImportacaoCsvResultado {
+  const ImportacaoCsvResultado({
+    required this.importados,
+    required this.inalterados,
+    required this.rejeitadas,
+  });
+
+  /// Valores mensais gravados (novos ou atualizados).
+  final int importados;
+
+  /// Valores que já estavam iguais no app (por exemplo, numa reimportação).
+  final int inalterados;
+
+  /// Células com valor ilegível, no formato `Origem (Mês/Ano): "texto"`.
+  final List<String> rejeitadas;
+
+  int get rejeitados => rejeitadas.length;
+
+  /// Resumo para mostrar ao usuário.
+  String get mensagem {
+    final partes = <String>[
+      '$importados ${importados == 1 ? 'valor importado' : 'valores importados'}',
+      if (inalterados > 0)
+        '$inalterados já ${inalterados == 1 ? 'estava' : 'estavam'} em dia',
+      if (rejeitados > 0)
+        '$rejeitados ${rejeitados == 1 ? 'célula ignorada' : 'células ignoradas'} por valor inválido',
+    ];
+    return '${partes.join(', ')}.';
+  }
+}
 
 /// Serviço responsável por importar e exportar dados em formato CSV.
-/// 
-/// O formato CSV segue o padrão da planilha do usuário:
+///
+/// O formato CSV segue o padrão da planilha:
 /// - 9 linhas em branco no início
-/// - Linha com título "Danillo Gastos Mensais"
-/// - Linha com cabeçalho: "A quem:", meses...
-/// - Linhas de dados: origem, valores por mês
+/// - Linha com o título
+/// - Linha com cabeçalho: "A quem:", meses de Abril a Abril do ano seguinte
+/// - Linhas de dados: origem, valores em aberto por mês
 /// - Linha de total no final
 class CsvService {
-  final GastosRepository _repository = GastosRepository();
+  CsvService({
+    BackupService? backupService,
+    Future<Directory> Function()? directoryProvider,
+  }) : _backupService = backupService ?? BackupService(),
+       _directoryProvider =
+           directoryProvider ?? getApplicationDocumentsDirectory;
+
+  final BackupService _backupService;
+  final Future<Directory> Function() _directoryProvider;
+  final DatabaseHelper _databaseHelper = DatabaseHelper();
+
+  static const String titulo = 'Diazen - Gastos Mensais';
 
   // Meses na ordem do CSV (Abril a Abril do próximo ano)
   static const List<String> _mesesCsv = [
     'Abril', 'Maio', 'Junho', 'Julho', 'Agosto', 'Setembro',
-    'Outubro', 'Novembro', 'Dezembro', 'Janeiro', 'Fevereiro', 'Março', 'Abril'
+    'Outubro', 'Novembro', 'Dezembro', 'Janeiro', 'Fevereiro', 'Março', 'Abril',
   ];
 
-  /// Mapeia o nome do mês para o número (1-12)
+  static const List<String> _nomesMeses = [
+    'Janeiro', 'Fevereiro', 'Março', 'Abril', 'Maio', 'Junho',
+    'Julho', 'Agosto', 'Setembro', 'Outubro', 'Novembro', 'Dezembro',
+  ];
+
+  /// Mapeia o nome do mês para o número (1-12), sem diferenciar maiúsculas
+  /// nem acento. Lança [FormatException] para nomes desconhecidos.
   static int _mesParaNumero(String mes) {
-    final meses = {
-      'Janeiro': 1, 'Fevereiro': 2, 'Março': 3, 'Abril': 4,
-      'Maio': 5, 'Junho': 6, 'Julho': 7, 'Agosto': 8,
-      'Setembro': 9, 'Outubro': 10, 'Novembro': 11, 'Dezembro': 12,
-    };
-    return meses[mes.trim()] ?? 1;
+    final chave = mes.trim().toLowerCase().replaceAll('ç', 'c');
+    for (var i = 0; i < _nomesMeses.length; i++) {
+      if (_nomesMeses[i].toLowerCase().replaceAll('ç', 'c') == chave) {
+        return i + 1;
+      }
+    }
+    throw FormatException('Mês desconhecido no cabeçalho do CSV: "$mes".');
   }
 
-  /// Mapeia o número do mês para o nome
-  static String _numeroParaMes(int mes) {
-    final meses = [
-      '', 'Janeiro', 'Fevereiro', 'Março', 'Abril', 'Maio', 'Junho',
-      'Julho', 'Agosto', 'Setembro', 'Outubro', 'Novembro', 'Dezembro'
-    ];
-    return meses[mes];
+  /// Decodifica os bytes do arquivo: UTF-8 e, se inválido, Latin-1
+  /// (Windows-1252, padrão do Excel no Windows).
+  static String decodificar(List<int> bytes) {
+    String texto;
+    try {
+      texto = utf8.decode(bytes);
+    } on FormatException {
+      texto = latin1.decode(bytes, allowInvalid: true);
+    }
+    return texto.startsWith('﻿') ? texto.substring(1) : texto;
   }
 
-  /// Exporta todos os gastos para um arquivo CSV no formato da planilha.
-  /// 
-  /// [anoInicio] é o ano de início (Abril desse ano até Março do próximo + Abril)
-  /// Retorna o caminho do arquivo gerado.
-  Future<String> exportarParaCsv({int? anoInicio}) async {
-    // Usa o ano atual como padrão
-    final ano = anoInicio ?? DateTime.now().year;
-    
-    // Obtém todas as origens distintas
-    final origens = await _repository.getOrigensDistintas();
-    
-    // Mapa para armazenar valores: origem -> mês -> valor
-    final Map<String, Map<String, double>> dados = {};
-    
-    // Inicializa o mapa com todas as origens
-    for (final origem in origens) {
-      dados[origem] = {};
-      for (final mes in _mesesCsv) {
-        dados[origem]![mes] = 0.0;
-      }
+  /// Escapa um campo CSV (aspas, vírgulas e quebras de linha).
+  static String _campo(String valor) {
+    final limpo = valor.replaceAll(RegExp(r'[\r\n]+'), ' ');
+    if (limpo.contains(RegExp(r'[",]'))) {
+      return '"${limpo.replaceAll('"', '""')}"';
     }
-    
-    // Busca os gastos de cada mês
-    // Abril a Dezembro do ano inicial
-    for (int m = 4; m <= 12; m++) {
-      final gastos = await _repository.getGastosDoMes(m, ano);
-      final mesNome = _numeroParaMes(m);
-      for (final gasto in gastos) {
-        if (!gasto.pago) { // Apenas gastos não pagos
-          dados[gasto.origem] ??= {};
-          dados[gasto.origem]![mesNome] = 
-              (dados[gasto.origem]![mesNome] ?? 0) + gasto.valor;
-        }
-      }
+    return limpo;
+  }
+
+  static String _valor(int centavos) =>
+      centavos == 0 ? '0' : '"${(centavos / 100).toStringAsFixed(2).replaceAll('.', ',')}"';
+
+  /// Gera o conteúdo do CSV com os valores em aberto de Abril de [anoInicio]
+  /// a Abril do ano seguinte.
+  Future<String> gerarCsv({required int anoInicio}) async {
+    final ano = anoInicio;
+    final db = await _databaseHelper.database;
+    final origens = (await db.rawQuery(
+      'SELECT DISTINCT origem FROM ${DatabaseHelper.tableGastos} ORDER BY origem ASC',
+    )).map((row) => row['origem'] as String).toList();
+    final rows = await db.rawQuery(
+      '''SELECT origem, mes, ano, SUM(valorCentavos) AS total
+      FROM ${DatabaseHelper.tableGastos}
+      WHERE pago = 0 AND ((ano = ? AND mes >= 4) OR (ano = ? AND mes <= 4))
+      GROUP BY origem, ano, mes''',
+      [ano, ano + 1],
+    );
+
+    // origem -> coluna (0 = Abril/ano, 12 = Abril/ano+1) -> centavos
+    final dados = {for (final origem in origens) origem: List.filled(13, 0)};
+    for (final row in rows) {
+      final m = row['mes'] as int;
+      final idx = row['ano'] == ano ? m - 4 : m + 8;
+      dados[row['origem'] as String]![idx] += (row['total'] as num).toInt();
     }
-    
-    // Janeiro a Abril do próximo ano
-    for (int m = 1; m <= 4; m++) {
-      final gastos = await _repository.getGastosDoMes(m, ano + 1);
-      final mesNome = _numeroParaMes(m);
-      for (final gasto in gastos) {
-        if (!gasto.pago) {
-          dados[gasto.origem] ??= {};
-          if (m == 4) {
-            // Abril do próximo ano vai na última coluna
-            dados[gasto.origem]!['Abril'] = 
-                (dados[gasto.origem]!['Abril'] ?? 0) + gasto.valor;
-          } else {
-            dados[gasto.origem]![mesNome] = 
-                (dados[gasto.origem]![mesNome] ?? 0) + gasto.valor;
-          }
-        }
-      }
-    }
-    
-    // Constrói o CSV
+
     final buffer = StringBuffer();
-    
-    // 9 linhas em branco
     for (int i = 0; i < 9; i++) {
       buffer.writeln(',,,,,,,,,,,,,,,');
     }
-    
-    // Linha do título
-    buffer.writeln(',,Danillo Gastos Mensais,,,,,,,,,,,,,');
-    
-    // Linha do cabeçalho
-    buffer.write(',,A quem:');
-    for (final mes in _mesesCsv) {
-      buffer.write(',$mes ');
-    }
-    buffer.writeln();
-    
-    // Linhas de dados
-    final Map<String, double> totaisPorMes = {};
-    for (final mes in _mesesCsv) {
-      totaisPorMes[mes] = 0.0;
-    }
-    
+    buffer.writeln(',,$titulo,,,,,,,,,,,,,');
+    buffer.writeln(',,A quem:,${_mesesCsv.join(',')}');
+
+    final totais = List.filled(13, 0);
     for (final origem in origens) {
-      buffer.write(',,$origem');
-      for (final mes in _mesesCsv) {
-        final valor = dados[origem]?[mes] ?? 0.0;
-        totaisPorMes[mes] = (totaisPorMes[mes] ?? 0) + valor;
-        // Formata o valor no padrão brasileiro
-        final valorStr = valor == 0 
-            ? '0' 
-            : valor.toStringAsFixed(2).replaceAll('.', ',');
-        buffer.write(',"$valorStr"');
+      buffer.write(',,${_campo(origem)}');
+      for (var i = 0; i < 13; i++) {
+        final valor = dados[origem]![i];
+        totais[i] += valor;
+        buffer.write(',${_valor(valor)}');
       }
       buffer.writeln();
     }
-    
-    // Linha de total
-    buffer.write(',,Total');
-    for (final mes in _mesesCsv) {
-      final total = totaisPorMes[mes] ?? 0.0;
-      final totalStr = total == 0 
-          ? '0' 
-          : total.toStringAsFixed(2).replaceAll('.', ',');
-      buffer.write(',"$totalStr"');
-    }
-    buffer.writeln();
-    
-    // Salva o arquivo
-    final directory = await getApplicationDocumentsDirectory();
-    final timestamp = DateTime.now().millisecondsSinceEpoch;
-    final filePath = '${directory.path}/finantech_export_$timestamp.csv';
-    final file = File(filePath);
-    await file.writeAsString(buffer.toString(), encoding: utf8);
-    
-    return filePath;
+    buffer.writeln(',,Total,${totais.map(_valor).join(',')}');
+    return buffer.toString();
   }
 
-  /// Importa gastos de um arquivo CSV no formato da planilha.
-  /// 
-  /// [csvContent] é o conteúdo do arquivo CSV.
-  /// [anoInicio] é o ano de referência para Abril (início do período).
-  /// Retorna o número de gastos importados.
-  Future<int> importarDeCsv(String csvContent, {int? anoInicio}) async {
+  /// Exporta os gastos em aberto para um arquivo CSV no formato da planilha.
+  ///
+  /// [anoInicio] é o ano de início (Abril desse ano até Abril do próximo).
+  /// Retorna o caminho do arquivo gerado.
+  Future<String> exportarParaCsv({int? anoInicio}) async {
+    final conteudo = await gerarCsv(
+      anoInicio: anoInicio ?? DateTime.now().year,
+    );
+    final directory = await _directoryProvider();
+    final timestamp = DateTime.now().millisecondsSinceEpoch;
+    final file = File('${directory.path}/diazen_export_$timestamp.csv');
+    await file.writeAsString(conteudo, encoding: utf8, flush: true);
+    return file.path;
+  }
+
+  /// Importa gastos de um CSV no formato da planilha.
+  ///
+  /// Cada célula representa o total em aberto da origem no mês: o valor
+  /// manual do app é **substituído** (não somado), descontando parcelas e
+  /// recorrências já existentes. Reimportar o mesmo arquivo não muda nada.
+  ///
+  /// Tudo é gravado numa única transação, depois de um backup automático
+  /// (desligue com [criarBackup] = false), e os lembretes são
+  /// ressincronizados uma única vez no fim.
+  Future<ImportacaoCsvResultado> importarDeCsv(
+    String csvContent, {
+    int? anoInicio,
+    bool criarBackup = true,
+  }) async {
     final ano = anoInicio ?? DateTime.now().year;
-    int importados = 0;
-    
-    // Divide o conteúdo em linhas
-    final linhas = csvContent.split('\n');
-    
-    // Encontra a linha do cabeçalho (contém "A quem:")
-    int linhaHeader = -1;
-    for (int i = 0; i < linhas.length; i++) {
-      if (linhas[i].contains('A quem:')) {
-        linhaHeader = i;
-        break;
-      }
+    final leitura = _ler(csvContent, ano);
+    if (criarBackup && leitura.valores.isNotEmpty) {
+      await _backupService.criarBackup();
     }
-    
-    if (linhaHeader == -1) {
-      throw Exception('Formato CSV inválido: cabeçalho não encontrado');
-    }
-    
-    // Parse do cabeçalho para obter os meses
-    final headerCells = _parseCsvLine(linhas[linhaHeader]);
-    final meses = <String>[];
-    bool foundAQuem = false;
-    for (final cell in headerCells) {
-      if (cell.trim().toLowerCase().contains('a quem')) {
-        foundAQuem = true;
-        continue;
+
+    final agora = DateTime.now().toIso8601String();
+    final db = await _databaseHelper.database;
+    final contagem = await db.transaction((txn) async {
+      var importados = 0;
+      var inalterados = 0;
+      for (final item in leitura.valores) {
+        switch (await _aplicar(txn, item, agora)) {
+          case true:
+            importados++;
+          case false:
+            inalterados++;
+        }
       }
-      if (foundAQuem && cell.trim().isNotEmpty) {
-        meses.add(cell.trim());
-      }
+      return (importados: importados, inalterados: inalterados);
+    });
+    if (contagem.importados > 0) GastosRepository.notificarAlteracao();
+    return ImportacaoCsvResultado(
+      importados: contagem.importados,
+      inalterados: contagem.inalterados,
+      rejeitadas: leitura.rejeitadas,
+    );
+  }
+
+  /// Retorna true se gravou, false se o app já tinha o valor.
+  Future<bool> _aplicar(
+    Transaction txn,
+    ({String origem, int mes, int ano, int centavos}) item,
+    String agora,
+  ) async {
+    final args = [item.origem, item.mes, item.ano];
+    const filtro =
+        'LOWER(origem) = LOWER(?) AND mes = ? AND ano = ? AND pago = 0';
+    final planejado = await txn.rawQuery(
+      '''SELECT COALESCE(SUM(valorCentavos), 0) AS total
+      FROM ${DatabaseHelper.tableGastos} WHERE $filtro
+      AND (parcelaGrupo IS NOT NULL OR recorrenciaId IS NOT NULL)''',
+      args,
+    );
+    final alvo = item.centavos - (planejado.first['total'] as num).toInt();
+    if (alvo <= 0) return false;
+
+    final manuais = (await txn.query(
+      DatabaseHelper.tableGastos,
+      where: '$filtro AND parcelaGrupo IS NULL AND recorrenciaId IS NULL',
+      whereArgs: args,
+      orderBy: 'createdAt DESC, id DESC',
+    )).map(Gasto.fromMap).toList();
+    final outros = manuais
+        .skip(1)
+        .fold<int>(0, (soma, g) => soma + g.valorCentavos);
+    final novo = alvo - outros;
+    if (novo <= 0) return false;
+
+    if (manuais.isEmpty) {
+      await txn.insert(
+        DatabaseHelper.tableGastos,
+        Gasto(
+          origem: item.origem,
+          valorCentavos: novo,
+          pago: false,
+          mes: item.mes,
+          ano: item.ano,
+          createdAt: agora,
+        ).toMap(),
+        conflictAlgorithm: ConflictAlgorithm.abort,
+      );
+      return true;
     }
-    
-    // Processa as linhas de dados (após o cabeçalho, até encontrar "Total")
-    for (int i = linhaHeader + 1; i < linhas.length; i++) {
-      final linha = linhas[i].trim();
-      if (linha.isEmpty) continue;
-      if (linha.toLowerCase().contains('total')) break;
-      
-      final cells = _parseCsvLine(linha);
-      
-      // Encontra a origem (primeira célula não vazia após as colunas vazias)
-      String? origem;
-      int startIdx = 0;
-      for (int j = 0; j < cells.length; j++) {
-        if (cells[j].trim().isNotEmpty && 
-            !cells[j].contains(',') && 
-            double.tryParse(cells[j].replaceAll(',', '.').replaceAll('"', '')) == null) {
-          origem = cells[j].trim();
-          startIdx = j + 1;
+    final atual = manuais.first;
+    if (atual.valorCentavos == novo) return false;
+    await txn.update(
+      DatabaseHelper.tableGastos,
+      {'valorCentavos': novo, 'valor': novo / 100},
+      where: 'id = ?',
+      whereArgs: [atual.id],
+    );
+    return true;
+  }
+
+  /// Lê o CSV sem tocar no banco. Lança [FormatException] se o cabeçalho
+  /// estiver ausente ou tiver um mês desconhecido.
+  ({
+    List<({String origem, int mes, int ano, int centavos})> valores,
+    List<String> rejeitadas,
+  })
+  _ler(String csvContent, int ano) {
+    final linhas = csvContent
+        .split('\n')
+        .map((linha) => linha.replaceAll('\r', ''))
+        .toList();
+
+    // Cabeçalho: a célula "A quem:" marca a coluna da origem.
+    var linhaHeader = -1;
+    var colunaOrigem = -1;
+    for (var i = 0; i < linhas.length && linhaHeader < 0; i++) {
+      final cells = _parseCsvLine(linhas[i]);
+      for (var j = 0; j < cells.length; j++) {
+        if (cells[j].trim().toLowerCase().startsWith('a quem')) {
+          linhaHeader = i;
+          colunaOrigem = j;
           break;
         }
       }
-      
-      if (origem == null || origem.toLowerCase() == 'total') continue;
-      
-      // Processa os valores para cada mês
-      int mesIdx = 0;
-      for (int j = startIdx; j < cells.length && mesIdx < meses.length; j++) {
-        final valorStr = cells[j].trim().replaceAll('"', '');
-        if (valorStr.isEmpty) {
-          mesIdx++;
+    }
+    if (linhaHeader == -1) {
+      throw const FormatException(
+        'Formato CSV inválido: cabeçalho "A quem:" não encontrado.',
+      );
+    }
+
+    // Coluna -> período. O ano avança quando a sequência de meses recomeça
+    // (Dezembro -> Janeiro), e o primeiro mês pertence a [ano].
+    final colunas = <int, ({int mes, int ano})>{};
+    final headerCells = _parseCsvLine(linhas[linhaHeader]);
+    var anoAtual = ano;
+    int? anterior;
+    for (var j = colunaOrigem + 1; j < headerCells.length; j++) {
+      final nome = headerCells[j].trim();
+      if (nome.isEmpty) continue;
+      final mes = _mesParaNumero(nome);
+      if (anterior != null && mes <= anterior) anoAtual++;
+      anterior = mes;
+      colunas[j] = (mes: mes, ano: anoAtual);
+    }
+    if (colunas.isEmpty) {
+      throw const FormatException('O cabeçalho do CSV não tem meses.');
+    }
+
+    // Origens repetidas no arquivo têm os valores do mês somados.
+    final acumulado = <String, ({String origem, int mes, int ano, int centavos})>{};
+    final rejeitadas = <String>[];
+    for (var i = linhaHeader + 1; i < linhas.length; i++) {
+      if (linhas[i].trim().isEmpty) continue;
+      final cells = _parseCsvLine(linhas[i]);
+      if (colunaOrigem >= cells.length) continue;
+      final origem = cells[colunaOrigem].trim();
+      if (origem.toLowerCase() == 'total') break;
+      if (origem.isEmpty) continue;
+
+      for (final entrada in colunas.entries) {
+        if (entrada.key >= cells.length) continue;
+        final texto = cells[entrada.key].trim();
+        if (texto.isEmpty) continue;
+        final periodo = entrada.value;
+        final centavos = CurrencyHelper.parseCentavos(texto);
+        if (centavos == null) {
+          rejeitadas.add(
+            '$origem (${_nomesMeses[periodo.mes - 1]}/${periodo.ano}): "$texto"',
+          );
           continue;
         }
-        
-        // Converte o valor
-        final valor = double.tryParse(valorStr.replaceAll(',', '.')) ?? 0.0;
-        
-        if (valor > 0) {
-          // Determina o mês e ano
-          final mesNome = meses[mesIdx];
-          final mesNum = _mesParaNumero(mesNome);
-          
-          // Abril a Dezembro = ano inicial, Janeiro a Abril = ano + 1
-          int anoGasto = ano;
-          if (mesNum >= 1 && mesNum <= 4 && mesIdx >= 9) {
-            // Janeiro a Abril após Dezembro = próximo ano
-            anoGasto = ano + 1;
-          } else if (mesNum >= 1 && mesNum <= 3) {
-            anoGasto = ano + 1;
-          }
-          
-          final gasto = Gasto(
-            origem: origem,
-            valor: valor,
-            pago: false,
-            mes: mesNum,
-            ano: anoGasto,
-            createdAt: DateTime.now().toIso8601String(),
-          );
-
-          await _repository.salvarSomandoSeExistir(gasto);
-          importados++;
-        }
-        mesIdx++;
+        if (centavos == 0) continue;
+        final chave = '${origem.toLowerCase()}|${periodo.ano}|${periodo.mes}';
+        final existente = acumulado[chave];
+        acumulado[chave] = (
+          origem: existente?.origem ?? origem,
+          mes: periodo.mes,
+          ano: periodo.ano,
+          centavos: (existente?.centavos ?? 0) + centavos,
+        );
       }
     }
-    
-    return importados;
+    return (valores: acumulado.values.toList(), rejeitadas: rejeitadas);
   }
 
-  /// Faz o parse de uma linha CSV, respeitando valores entre aspas
+  /// Faz o parse de uma linha CSV, respeitando aspas e aspas duplicadas ("").
   List<String> _parseCsvLine(String line) {
     final result = <String>[];
     final buffer = StringBuffer();
-    bool inQuotes = false;
-    
-    for (int i = 0; i < line.length; i++) {
+    var inQuotes = false;
+
+    for (var i = 0; i < line.length; i++) {
       final char = line[i];
-      
       if (char == '"') {
-        inQuotes = !inQuotes;
+        if (inQuotes && i + 1 < line.length && line[i + 1] == '"') {
+          buffer.write('"');
+          i++;
+        } else {
+          inQuotes = !inQuotes;
+        }
       } else if (char == ',' && !inQuotes) {
         result.add(buffer.toString());
         buffer.clear();
@@ -279,24 +378,18 @@ class CsvService {
         buffer.write(char);
       }
     }
-    
-    // Adiciona o último campo
     result.add(buffer.toString());
-    
     return result;
   }
 
   /// Retorna o diretório de downloads (ou documentos como fallback)
   Future<Directory> getExportDirectory() async {
     try {
-      // Tenta obter o diretório de downloads externo (Android)
       final externalDir = await getExternalStorageDirectory();
       if (externalDir != null) {
         return externalDir;
       }
     } catch (_) {}
-    
-    // Fallback para documentos
     return await getApplicationDocumentsDirectory();
   }
 }

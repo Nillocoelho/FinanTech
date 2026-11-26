@@ -1,7 +1,23 @@
+import java.io.FileInputStream
+import java.util.Properties
+
 plugins {
     id("com.android.application")
     // The Flutter Gradle Plugin must be applied after the Android and Kotlin Gradle plugins.
     id("dev.flutter.flutter-gradle-plugin")
+}
+
+// Chave de assinatura de release, lida de android/key.properties (fora do git).
+// Formato esperado:
+//   storePassword=...
+//   keyPassword=...
+//   keyAlias=...
+//   storeFile=caminho/para/diazen-release.jks
+val keystorePropertiesFile = rootProject.file("key.properties")
+val keystoreProperties = Properties()
+val hasReleaseKeystore = keystorePropertiesFile.exists()
+if (hasReleaseKeystore) {
+    FileInputStream(keystorePropertiesFile).use { keystoreProperties.load(it) }
 }
 
 android {
@@ -17,24 +33,41 @@ android {
     }
 
     defaultConfig {
-        // TODO: Specify your own unique Application ID (https://developer.android.com/studio/build/application-id.html).
-        applicationId = "com.finantech.finantech"
+        // O namespace (pacote do código Kotlin) continua o antigo; só o id
+        // publicado mudou. Instalações com o id anterior são outro app.
+        applicationId = "br.com.diazen.app"
         // You can update the following values to match your application needs.
         // For more information, see: https://flutter.dev/to/review-gradle-config.
+        // minSdk do Flutter é >= 21, então o multidex já é nativo (sem multiDexEnabled).
         minSdk = flutter.minSdkVersion
         targetSdk = flutter.targetSdkVersion
         versionCode = flutter.versionCode
         versionName = flutter.versionName
-        
-        // Habilita multidex para suportar mais de 65k métodos
-        multiDexEnabled = true
+    }
+
+    signingConfigs {
+        if (hasReleaseKeystore) {
+            create("release") {
+                keyAlias = keystoreProperties["keyAlias"] as String
+                keyPassword = keystoreProperties["keyPassword"] as String
+                storeFile = file(keystoreProperties["storeFile"] as String)
+                storePassword = keystoreProperties["storePassword"] as String
+            }
+        }
     }
 
     buildTypes {
         release {
-            // TODO: Add your own signing config for the release build.
-            // Signing with the debug keys for now, so `flutter run --release` works.
-            signingConfig = signingConfigs.getByName("debug")
+            // Sem android/key.properties (ex.: máquina de desenvolvimento), o
+            // release cai na chave de debug só para `flutter run --release`
+            // funcionar. NÃO distribua esse APK: a Play Store o recusa e um
+            // APK com outra chave não atualiza o instalado (só desinstalando,
+            // o que apaga o banco local).
+            signingConfig = if (hasReleaseKeystore) {
+                signingConfigs.getByName("release")
+            } else {
+                signingConfigs.getByName("debug")
+            }
         }
     }
 }

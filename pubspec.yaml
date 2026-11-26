@@ -58,20 +58,35 @@ flutter_launcher_icons:
   android: true
   ios: true
   image_path: "assets/images/icon.png"
-  adaptive_icon_background: "#FFFFFF"
-  adaptive_icon_foreground: "assets/images/icon.png"
+  image_path_ios: "assets/branding/icon_ios.png"
+  remove_alpha_ios: true
+  adaptive_icon_background: "#14161A"
+  adaptive_icon_foreground: "assets/branding/icon_foreground.png"
+  adaptive_icon_foreground_inset: 0
 
 flutter:
   uses-material-design: true
   fonts:
-    - family: Roboto
+    - family: Inter
       fonts:
-        - asset: assets/fonts/Roboto-Regular.ttf
+        - asset: assets/fonts/Inter-Regular.ttf
           weight: 400
-        - asset: assets/fonts/Roboto-Medium.ttf
+        - asset: assets/fonts/Inter-Medium.ttf
           weight: 500
-        - asset: assets/fonts/Roboto-Bold.ttf
+        - asset: assets/fonts/Inter-SemiBold.ttf
+          weight: 600
+        - asset: assets/fonts/Inter-Bold.ttf
           weight: 700
-  
+    - family: SpaceGrotesk
+      fonts:
+        - asset: assets/fonts/SpaceGrotesk-Medium.ttf
+          weight: 500
+        - asset: assets/fonts/SpaceGrotesk-SemiBold.ttf
+          weight: 600
+        - asset: assets/fonts/SpaceGrotesk-Bold.ttf
+          weight: 700
+
   assets:
     - assets/images/
+    - assets/fonts/OFL-Inter.txt
+    - assets/fonts/OFL-SpaceGrotesk.txt

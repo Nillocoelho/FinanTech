@@ -1,14 +1,23 @@
+import 'dart:async';
+
 import 'package:flutter/foundation.dart';
-import '../data/database_helper.dart';
-import '../models/gasto.dart';
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
-import 'package:timezone/timezone.dart' as tz;
-import 'package:timezone/data/latest.dart' as tz_data;
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:timezone/timezone.dart' as tz;
+
+import '../data/database_helper.dart';
+import '../data/gastos_repository.dart';
+import '../models/gasto.dart';
+import '../utils/currency_helper.dart';
+
+/// Lembrete calculado para um gasto em aberto.
+typedef LembretePlanejado = ({Gasto gasto, DateTime data, bool noDia});
 
 /// Serviço responsável por gerenciar notificações locais do aplicativo.
 ///
-/// Agenda avisos na véspera do vencimento dos gastos em aberto.
+/// Agenda avisos na véspera do vencimento dos gastos em aberto. A
+/// sincronização é disparada pelas alterações do [GastosRepository], com
+/// debounce, e nunca bloqueia a interface.
 class NotificationService {
   // Instância singleton
   static final NotificationService _instance = NotificationService._internal();
@@ -21,160 +30,268 @@ class NotificationService {
 
   // Chaves para salvar preferências
   static const String _reminderEnabledKey = 'monthly_reminder_enabled';
-  static const String _reminderDayKey = 'monthly_reminder_day';
   static const String _reminderHourKey = 'monthly_reminder_hour';
   static const String _reminderMinuteKey = 'monthly_reminder_minute';
 
   // Valores padrão
-  static const int defaultDay = 10;
   static const int defaultHour = 9;
   static const int defaultMinute = 0;
 
+  /// Teto de lembretes agendados em todas as plataformas (o iOS aceita 64 e
+  /// alguns fabricantes Android cortam alarmes em excesso).
+  static const int maxLembretes = 50;
+
+  /// Intervalo de agrupamento das sincronizações.
+  static const Duration debounce = Duration(milliseconds: 300);
+
+  /// Id reservado para a notificação de teste; lembretes usam id do gasto + 100.
+  static const int _testId = 0;
+
   // Canal de notificação Android
   static const String _channelId = 'finantech_due_reminders_v2';
-  static const String _channelName = 'Lembretes Financeiros';
+  static const String _channelName = 'Lembretes do Diazen';
   static const String _channelDescription =
       'Avisos um dia antes do vencimento das contas';
 
-  /// Inicializa o serviço de notificações.
+  static const AndroidNotificationDetails _androidDetails =
+      AndroidNotificationDetails(
+        _channelId,
+        _channelName,
+        channelDescription: _channelDescription,
+        importance: Importance.high,
+        priority: Priority.high,
+        playSound: true,
+        enableVibration: true,
+        // O corpo mostra o valor da conta: na tela de bloqueio, só o aviso.
+        visibility: NotificationVisibility.private,
+      );
+
+  bool _initialized = false;
+  StreamSubscription<void>? _changesSubscription;
+  Timer? _debounceTimer;
+  Future<void>? _syncEmAndamento;
+  bool _syncPendente = false;
+
+  /// Inicializa o plugin de notificações.
   ///
-  /// Deve ser chamado no início do app (main.dart) antes de usar
-  /// qualquer outro método deste serviço.
-  ///
-  /// Configura:
-  /// - Timezone local para agendamentos
-  /// - Plugin de notificações com configurações Android/iOS
-  /// - Solicita permissão de notificação (Android 13+)
+  /// Não pede permissão nem sincroniza: a permissão é pedida ao ativar os
+  /// lembretes e a sincronização é agendada por [agendarSincronizacao].
+  /// Usa apenas o fuso UTC do pacote timezone (os horários são convertidos
+  /// do fuso do aparelho para um instante UTC), sem carregar a base de fusos.
   Future<void> initNotifications() async {
     try {
-      // Inicializa dados de timezone
-      tz_data.initializeTimeZones();
-
-      // Configuração para Android
       const androidSettings = AndroidInitializationSettings(
         '@mipmap/ic_launcher',
       );
-
-      // Configuração para iOS (opcional, mas bom ter)
       const iosSettings = DarwinInitializationSettings(
-        requestAlertPermission: true,
-        requestBadgePermission: true,
-        requestSoundPermission: true,
+        requestAlertPermission: false,
+        requestBadgePermission: false,
+        requestSoundPermission: false,
       );
-
-      // Configurações gerais de inicialização
       const initSettings = InitializationSettings(
         android: androidSettings,
         iOS: iosSettings,
       );
 
-      // Inicializa o plugin
       await _notificationsPlugin.initialize(
         settings: initSettings,
         onDidReceiveNotificationResponse: _onNotificationTapped,
       );
-
-      // Solicita permissão de notificação (Android 13+)
       _initialized = true;
-      await _requestNotificationPermission();
-      await syncExpenseReminders();
+      _changesSubscription ??= GastosRepository.changes.listen(
+        (_) => agendarSincronizacao(),
+      );
     } catch (e) {
       // Ignora erros de inicialização - o app continua funcionando
-      // ignore: avoid_print
-      print('Erro ao inicializar notificações: $e');
+      debugPrint('Erro ao inicializar notificações: $e');
     }
   }
 
   /// Callback executado quando o usuário toca na notificação.
-  ///
-  /// Pode ser usado para navegar para uma tela específica.
   void _onNotificationTapped(NotificationResponse response) {
     // Por enquanto, apenas abre o app (comportamento padrão)
-    // Pode ser expandido para navegar para uma tela específica
   }
 
-  /// Solicita permissão de notificação ao usuário (Android 13+).
-  ///
-  /// Em versões anteriores do Android, a permissão é concedida automaticamente.
-  Future<void> _requestNotificationPermission() async {
+  /// Pede a permissão de notificação e informa se ela está concedida.
+  Future<bool> solicitarPermissao() async {
     final androidPlugin = _notificationsPlugin
         .resolvePlatformSpecificImplementation<
           AndroidFlutterLocalNotificationsPlugin
         >();
-
     if (androidPlugin != null) {
       final granted = await androidPlugin.requestNotificationsPermission();
-      if (granted == false) {
-        throw StateError(
-          'Ative as notifica\u00e7\u00f5es do FinanTech nas configura\u00e7\u00f5es do celular.',
-        );
+      if (granted == false) return false;
+      return await androidPlugin.areNotificationsEnabled() ?? granted ?? true;
+    }
+    final iosPlugin = _notificationsPlugin
+        .resolvePlatformSpecificImplementation<
+          IOSFlutterLocalNotificationsPlugin
+        >();
+    if (iosPlugin != null) {
+      return await iosPlugin.requestPermissions(
+            alert: true,
+            badge: true,
+            sound: true,
+          ) ??
+          false;
+    }
+    return true;
+  }
+
+  /// Informa se o sistema permite exibir notificações, sem pedir permissão.
+  /// Retorna `null` quando a plataforma não informa.
+  Future<bool?> notificacoesPermitidas() async {
+    try {
+      return await _notificationsPlugin
+          .resolvePlatformSpecificImplementation<
+            AndroidFlutterLocalNotificationsPlugin
+          >()
+          ?.areNotificationsEnabled();
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /// Abre as configurações de notificação do app no sistema.
+  Future<void> abrirConfiguracoesDoSistema() async {
+    await _notificationsPlugin.openAppNotificationSettings();
+  }
+
+  /// Data do aviso: véspera do vencimento no horário configurado.
+  static DateTime reminderDate(DateTime due, int hour, int minute) =>
+      DateTime(due.year, due.month, due.day - 1, hour, minute);
+
+  /// Calcula os próximos lembretes, em ordem, limitados a [limite].
+  ///
+  /// Se a véspera já passou mas o horário do dia do vencimento ainda não,
+  /// o aviso é marcado para o próprio dia do vencimento.
+  static List<LembretePlanejado> planejarLembretes(
+    Iterable<Gasto> gastos,
+    DateTime now,
+    int hour,
+    int minute, {
+    int limite = maxLembretes,
+  }) {
+    final planejados = <LembretePlanejado>[];
+    for (final gasto in gastos) {
+      final due = gasto.vencimento;
+      if (gasto.pago || due == null || gasto.id == null || gasto.projetado) {
+        continue;
+      }
+      final vespera = reminderDate(due, hour, minute);
+      if (vespera.isAfter(now)) {
+        planejados.add((gasto: gasto, data: vespera, noDia: false));
+        continue;
+      }
+      final noDia = DateTime(due.year, due.month, due.day, hour, minute);
+      if (noDia.isAfter(now)) {
+        planejados.add((gasto: gasto, data: noDia, noDia: true));
+      }
+    }
+    planejados.sort((a, b) => a.data.compareTo(b.data));
+    return planejados.take(limite).toList();
+  }
+
+  /// Agenda uma sincronização com debounce, sem esperar o resultado.
+  void agendarSincronizacao() {
+    if (!_initialized) return;
+    _debounceTimer?.cancel();
+    _debounceTimer = Timer(debounce, () => unawaited(refreshAfterChange()));
+  }
+
+  /// Sincroniza os lembretes; chamadas concorrentes são agrupadas.
+  Future<void> syncExpenseReminders() async {
+    if (!_initialized) return;
+    if (_syncEmAndamento != null) {
+      _syncPendente = true;
+      return _syncEmAndamento;
+    }
+    final completer = Completer<void>();
+    _syncEmAndamento = completer.future;
+    try {
+      do {
+        _syncPendente = false;
+        await _sincronizar();
+      } while (_syncPendente);
+      completer.complete();
+    } catch (error, stack) {
+      completer.completeError(error, stack);
+    } finally {
+      _syncEmAndamento = null;
+    }
+    return completer.future;
+  }
+
+  Future<void> _sincronizar() async {
+    final enabled = await isReminderEnabled();
+    final plano = enabled ? await _planoAtual() : const <LembretePlanejado>[];
+    final ids = {for (final item in plano) item.gasto.id! + 100};
+
+    // Cancela só os pendentes que saíram do plano; notificações já exibidas
+    // e a de teste não são tocadas.
+    List<PendingNotificationRequest> pendentes;
+    try {
+      pendentes = await _notificationsPlugin.pendingNotificationRequests();
+    } catch (error) {
+      debugPrint('Erro ao listar lembretes pendentes: $error');
+      pendentes = const [];
+    }
+    for (final pendente in pendentes) {
+      if (pendente.id == _testId || ids.contains(pendente.id)) continue;
+      try {
+        await _notificationsPlugin.cancel(id: pendente.id);
+      } catch (error) {
+        debugPrint('Erro ao cancelar lembrete ${pendente.id}: $error');
+      }
+    }
+
+    for (final item in plano) {
+      try {
+        await _agendar(item);
+      } catch (error) {
+        // Um lembrete com problema não impede os demais.
+        debugPrint('Erro ao agendar lembrete ${item.gasto.id}: $error');
       }
     }
   }
 
-  /// Ativa e atualiza os avisos individuais de vencimento.
-  Future<void> scheduleMonthlyReminder() async {
-    await _setReminderEnabled(true);
-    await syncExpenseReminders();
-  }
-
-  bool _initialized = false;
-
-  static DateTime reminderDate(DateTime due, int hour, int minute) =>
-      DateTime(due.year, due.month, due.day - 1, hour, minute);
-
-  Future<void> syncExpenseReminders() async {
-    if (!_initialized) return;
-    // Remove também o antigo lembrete mensal durante a migração.
-    await _notificationsPlugin.cancelAll();
-    if (!await isReminderEnabled()) return;
-    final db = await DatabaseHelper().database;
-    final rows = await db.query(
-      DatabaseHelper.tableGastos,
-      where: 'pago = 0 AND vencimento IS NOT NULL',
-    );
+  Future<List<LembretePlanejado>> _planoAtual() async {
     final hour = await getReminderHour();
     final minute = await getReminderMinute();
     final now = DateTime.now();
-    final upcoming =
-        rows
-            .map(Gasto.fromMap)
-            .where(
-              (g) => reminderDate(g.vencimento!, hour, minute).isAfter(now),
-            )
-            .toList()
-          ..sort((a, b) => a.vencimento!.compareTo(b.vencimento!));
-    for (final gasto
-        in (defaultTargetPlatform == TargetPlatform.iOS
-            ? upcoming.take(60)
-            : upcoming)) {
-      final date = reminderDate(gasto.vencimento!, hour, minute);
-      await _notificationsPlugin.zonedSchedule(
-        id: gasto.id! + 100,
-        title: 'Conta vence amanhã',
-        body:
-            '${gasto.origem}: R\$ ${gasto.valor.toStringAsFixed(2).replaceAll('.', ',')}. Vence amanhã.',
-        // DateTime usa o fuso do celular, convertido para um instante UTC.
-        scheduledDate: tz.TZDateTime.from(date, tz.UTC),
-        notificationDetails: const NotificationDetails(
-          android: AndroidNotificationDetails(
-            _channelId,
-            _channelName,
-            channelDescription: 'Avisos um dia antes do vencimento das contas',
-            importance: Importance.high,
-            priority: Priority.high,
-            playSound: true,
-            enableVibration: true,
-          ),
-          iOS: DarwinNotificationDetails(
-            presentAlert: true,
-            presentSound: true,
-            presentBadge: true,
-          ),
+    final ontem = DateTime(now.year, now.month, now.day - 1);
+    final db = await DatabaseHelper().database;
+    // Só os próximos vencimentos em aberto, já ordenados pelo banco.
+    final rows = await db.query(
+      DatabaseHelper.tableGastos,
+      where: 'pago = 0 AND vencimento IS NOT NULL AND vencimento >= ?',
+      whereArgs: [ontem.toIso8601String()],
+      orderBy: 'vencimento',
+      limit: maxLembretes * 4,
+    );
+    return planejarLembretes(rows.map(Gasto.fromMap), now, hour, minute);
+  }
+
+  Future<void> _agendar(LembretePlanejado item) async {
+    final gasto = item.gasto;
+    final valor = CurrencyHelper.formatCentavos(gasto.valorCentavos);
+    await _notificationsPlugin.zonedSchedule(
+      id: gasto.id! + 100,
+      title: item.noDia ? 'Conta vence hoje' : 'Conta vence amanhã',
+      body:
+          '${gasto.origem}: R\$ $valor. ${item.noDia ? 'Vence hoje.' : 'Vence amanhã.'}',
+      // DateTime usa o fuso do celular, convertido para um instante UTC.
+      scheduledDate: tz.TZDateTime.from(item.data, tz.UTC),
+      notificationDetails: const NotificationDetails(
+        android: _androidDetails,
+        iOS: DarwinNotificationDetails(
+          presentAlert: true,
+          presentSound: true,
+          presentBadge: true,
         ),
-        androidScheduleMode: AndroidScheduleMode.inexactAllowWhileIdle,
-      );
-    }
+      ),
+      androidScheduleMode: AndroidScheduleMode.inexactAllowWhileIdle,
+    );
   }
 
   /// Atualiza os avisos sem comprometer a gravação dos gastos.
@@ -186,21 +303,9 @@ class NotificationService {
     }
   }
 
-  /// Cancela o lembrete mensal agendado.
-  ///
-  /// Remove qualquer notificação pendente com o ID do lembrete mensal.
-  Future<void> cancelMonthlyReminder() async {
-    await _notificationsPlugin.cancelAll();
-    await _setReminderEnabled(false);
-  }
-
-  /// Verifica se o lembrete mensal está ativo.
-  ///
-  /// Lê a preferência salva no SharedPreferences.
-  /// Retorna true por padrão se nunca foi configurado.
+  /// Verifica se os lembretes estão ativos (padrão: true).
   Future<bool> isReminderEnabled() async {
     final prefs = await SharedPreferences.getInstance();
-    // Retorna true por padrão (lembrete ativado na primeira execução)
     return prefs.getBool(_reminderEnabledKey) ?? true;
   }
 
@@ -208,12 +313,6 @@ class NotificationService {
   Future<void> _setReminderEnabled(bool enabled) async {
     final prefs = await SharedPreferences.getInstance();
     await prefs.setBool(_reminderEnabledKey, enabled);
-  }
-
-  /// Obtém o dia configurado para o lembrete (padrão: 10)
-  Future<int> getReminderDay() async {
-    final prefs = await SharedPreferences.getInstance();
-    return prefs.getInt(_reminderDayKey) ?? defaultDay;
   }
 
   /// Obtém a hora configurada para o lembrete (padrão: 9)
@@ -228,75 +327,45 @@ class NotificationService {
     return prefs.getInt(_reminderMinuteKey) ?? defaultMinute;
   }
 
-  /// Salva o dia do lembrete
-  Future<void> setReminderDay(int day) async {
-    final prefs = await SharedPreferences.getInstance();
-    await prefs.setInt(_reminderDayKey, day);
-  }
-
-  /// Salva a hora do lembrete
-  Future<void> setReminderHour(int hour) async {
+  /// Salva o horário dos avisos e ressincroniza se estiverem ativos.
+  Future<void> updateReminderSchedule(int hour, int minute) async {
     final prefs = await SharedPreferences.getInstance();
     await prefs.setInt(_reminderHourKey, hour);
-  }
-
-  /// Salva os minutos do lembrete
-  Future<void> setReminderMinute(int minute) async {
-    final prefs = await SharedPreferences.getInstance();
     await prefs.setInt(_reminderMinuteKey, minute);
+    if (await isReminderEnabled()) agendarSincronizacao();
   }
 
-  /// Salva todas as configurações de horário e reagenda o lembrete
-  Future<void> updateReminderSchedule(int day, int hour, int minute) async {
-    await setReminderDay(day);
-    await setReminderHour(hour);
-    await setReminderMinute(minute);
-
-    // Se o lembrete está ativo, reagenda com as novas configurações
-    final isEnabled = await isReminderEnabled();
-    if (isEnabled) {
-      await scheduleMonthlyReminder();
-    }
-  }
-
-  /// Alterna o estado do lembrete mensal.
+  /// Ativa ou desativa os lembretes.
   ///
-  /// Se [enabled] for true, agenda o lembrete.
-  /// Se [enabled] for false, cancela o lembrete.
-  Future<void> toggleReminder(bool enabled) async {
-    if (enabled) {
-      await scheduleMonthlyReminder();
-    } else {
-      await cancelMonthlyReminder();
+  /// Ao ativar, pede a permissão; se negada, os lembretes continuam
+  /// desativados e o retorno é `false`. Retorna o estado final.
+  Future<bool> toggleReminder(bool enabled) async {
+    if (enabled && !await solicitarPermissao()) {
+      await _setReminderEnabled(false);
+      return false;
     }
+    await _setReminderEnabled(enabled);
+    agendarSincronizacao();
+    return enabled;
   }
 
   /// Envia uma notificação de teste imediata.
   ///
-  /// Útil para verificar se as notificações estão funcionando.
-  /// Não afeta o lembrete mensal agendado.
+  /// Lança [StateError] se a permissão for negada.
   Future<void> showTestNotification() async {
-    await _requestNotificationPermission();
-    const androidDetails = AndroidNotificationDetails(
-      _channelId,
-      _channelName,
-      channelDescription: _channelDescription,
-      importance: Importance.high,
-      priority: Priority.high,
-      playSound: true,
-      enableVibration: true,
-    );
-
-    const notificationDetails = NotificationDetails(
-      android: androidDetails,
-      iOS: DarwinNotificationDetails(presentAlert: true, presentSound: true),
-    );
-
+    if (!await solicitarPermissao()) {
+      throw StateError(
+        'Ative as notificações do Diazen nas configurações do celular.',
+      );
+    }
     await _notificationsPlugin.show(
-      id: 0, // ID reservado para o teste
+      id: _testId,
       title: 'Teste de notificação',
       body: 'As notificações estão funcionando corretamente!',
-      notificationDetails: notificationDetails,
+      notificationDetails: const NotificationDetails(
+        android: _androidDetails,
+        iOS: DarwinNotificationDetails(presentAlert: true, presentSound: true),
+      ),
     );
   }
 }

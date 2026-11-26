@@ -178,7 +178,7 @@ class SettingsContent extends StatelessWidget {
               _Action(
                 icon: Icons.file_download_outlined,
                 title: 'Importar planilha',
-                subtitle: 'Adicione lançamentos de um CSV',
+                subtitle: 'Substitui os valores do mês por origem',
                 onTap: busy ? null : onImport,
               ),
             ],
@@ -194,7 +194,7 @@ class SettingsContent extends StatelessWidget {
               Padding(
                 padding: EdgeInsets.fromLTRB(4, 0, 4, 16),
                 child: Text(
-                  'Colunas: Origem, Abril, Maio, até Abril do ano seguinte. Os valores usam vírgula decimal e há uma linha de total no final. O CSV não substitui o backup completo.',
+                  'Colunas: Origem, Abril, Maio, até Abril do ano seguinte. Os valores usam vírgula decimal e há uma linha de total no final. Ao importar, os valores do arquivo substituem os do app e um backup é criado antes. O CSV não substitui o backup completo.',
                   style: TextStyle(
                     fontSize: 12,
                     color: FinanceColors.muted,
@@ -207,7 +207,7 @@ class SettingsContent extends StatelessWidget {
           const SizedBox(height: 28),
           const Center(
             child: Text(
-              'FINANTECH',
+              'DIAZEN',
               style: TextStyle(
                 fontSize: 11,
                 fontWeight: FontWeight.w700,

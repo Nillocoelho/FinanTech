@@ -76,10 +76,11 @@ void main() {
       });
       await legacy.close();
       final db = await DatabaseHelper().database;
-      expect(await db.getVersion(), 3);
+      expect(await db.getVersion(), 4);
       final row = (await repo.getGastosDoMes(12, 2025)).single;
       expect(row.id, 9);
       expect(row.valor, 149.99);
+      expect(row.valorCentavos, 14999);
       expect(row.pago, isTrue);
       expect(row.categoria, 'Sem categoria');
       expect(row.parcelaGrupo, isNull);

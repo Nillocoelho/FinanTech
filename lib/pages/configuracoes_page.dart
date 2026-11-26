@@ -11,9 +11,8 @@ import '../widgets/settings_content.dart';
 
 /// Tela de configurações do aplicativo.
 ///
-/// Permite ao usuário configurar preferências do app,
-/// incluindo o lembrete mensal de revisão de gastos
-/// e importação/exportação de dados.
+/// Permite ao usuário configurar os lembretes de vencimento
+/// e importar/exportar dados.
 class ConfiguracoesPage extends StatefulWidget {
   const ConfiguracoesPage({super.key});
 
@@ -25,48 +24,63 @@ class _ConfiguracoesPageState extends State<ConfiguracoesPage> {
   final NotificationService _notificationService = NotificationService();
   final CsvService _csvService = CsvService();
   final BackupService _backupService = BackupService();
-  bool _backupBusy = false;
 
-  void _mensagemBackup(String mensagem) {
+  /// Operação de backup/planilha em andamento (desabilita os botões e mostra
+  /// o indicador de progresso na própria página, sem diálogo modal).
+  bool _busy = false;
+
+  void _mensagem(String mensagem, {SnackBarAction? action}) {
     if (!mounted) return;
-    ScaffoldMessenger.of(context)
-        .showSnackBar(SnackBar(content: Text(mensagem)));
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(mensagem),
+        action: action,
+        behavior: SnackBarBehavior.floating,
+      ),
+    );
   }
 
-  Future<void> _criarBackup() async {
-    setState(() => _backupBusy = true);
+  /// Executa [acao] com a página marcada como ocupada.
+  Future<void> _ocupado(Future<void> Function() acao) async {
+    if (_busy) return;
+    setState(() => _busy = true);
+    try {
+      await acao();
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
+  }
+
+  Future<void> _criarBackup() => _ocupado(() async {
     try {
       final path = await _backupService.criarBackup();
       if (!mounted) return;
-      _mensagemBackup(
+      _mensagem(
         'Backup salvo neste aparelho. Compartilhe para guardar uma cópia fora dele.',
       );
       final box = context.findRenderObject() as RenderBox?;
       await SharePlus.instance.share(
         ShareParams(
           files: [XFile(path)],
-          text: 'Backup completo dos gastos FinanTech',
+          text: 'Backup completo dos gastos no Diazen',
           sharePositionOrigin: box == null
               ? null
               : box.localToGlobal(Offset.zero) & box.size,
         ),
       );
     } catch (error) {
-      _mensagemBackup('Não foi possível concluir o backup: $error');
-    } finally {
-      if (mounted) setState(() => _backupBusy = false);
+      _mensagem('Não foi possível concluir o backup: $error');
     }
-  }
+  });
 
-  Future<void> _restaurarBackup({bool local = false}) async {
-    setState(() => _backupBusy = true);
+  Future<void> _restaurarBackup({bool local = false}) => _ocupado(() async {
     try {
       String? path;
       if (local) {
         final files = await _backupService.listarBackupsLocais();
         if (!mounted) return;
         if (files.isEmpty) {
-          _mensagemBackup('Nenhum backup salvo neste aparelho.');
+          _mensagem('Nenhum backup salvo neste aparelho.');
           return;
         }
         path = await showDialog<String>(
@@ -92,7 +106,7 @@ class _ConfiguracoesPageState extends State<ConfiguracoesPage> {
       }
       if (path == null) return;
       final document = BackupService.decodeDocument(
-        await File(path).readAsString(),
+        CsvService.decodificar(await File(path).readAsBytes()),
       );
       final gastos = document.gastos;
       if (!mounted) return;
@@ -121,24 +135,22 @@ class _ConfiguracoesPageState extends State<ConfiguracoesPage> {
         recorrencias: document.recorrencias,
       );
       await _carregarConfiguracoes();
-      _mensagemBackup(
-        '${gastos.length} gastos restaurados. Lembretes atualizados.',
-      );
+      _mensagem('${gastos.length} gastos restaurados. Lembretes atualizados.');
     } catch (error) {
-      _mensagemBackup('Não foi possível restaurar o backup: $error');
-    } finally {
-      if (mounted) setState(() => _backupBusy = false);
+      _mensagem('Não foi possível restaurar o backup: $error');
     }
-  }
+  });
 
   // Estado do switch de lembrete
   bool _lembreteAtivo = true;
   bool _isLoading = true;
 
-  // Configurações de dia e hora
-  int _diaLembrete = NotificationService.defaultDay;
+  // Horário do aviso
   int _horaLembrete = NotificationService.defaultHour;
   int _minutoLembrete = NotificationService.defaultMinute;
+
+  String get _horario =>
+      '${_horaLembrete.toString().padLeft(2, '0')}:${_minutoLembrete.toString().padLeft(2, '0')}';
 
   @override
   void initState() {
@@ -146,46 +158,49 @@ class _ConfiguracoesPageState extends State<ConfiguracoesPage> {
     _carregarConfiguracoes();
   }
 
-  /// Carrega as configurações salvas
+  /// Carrega as configurações salvas.
+  ///
+  /// O switch só aparece ligado se o sistema também permitir notificações.
   Future<void> _carregarConfiguracoes() async {
     final isEnabled = await _notificationService.isReminderEnabled();
-    final dia = await _notificationService.getReminderDay();
+    final permitido = await _notificationService.notificacoesPermitidas();
     final hora = await _notificationService.getReminderHour();
     final minuto = await _notificationService.getReminderMinute();
 
     if (!mounted) return;
     setState(() {
-      _lembreteAtivo = isEnabled;
-      _diaLembrete = dia;
+      _lembreteAtivo = isEnabled && permitido != false;
       _horaLembrete = hora;
       _minutoLembrete = minuto;
       _isLoading = false;
     });
   }
 
-  /// Alterna o estado do lembrete mensal
+  /// Ativa ou desativa os lembretes, pedindo a permissão ao ativar.
   Future<void> _toggleLembrete(bool value) async {
     setState(() => _lembreteAtivo = value);
+    final ativo = await _notificationService.toggleReminder(value);
+    if (!mounted) return;
+    setState(() => _lembreteAtivo = ativo);
 
-    await _notificationService.toggleReminder(value);
-
-    if (mounted) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text(
-            value
-                ? 'Lembretes ativados para a véspera às ${_horaLembrete.toString().padLeft(2, '0')}:${_minutoLembrete.toString().padLeft(2, '0')}'
-                : 'Lembretes desativados.',
-          ),
-          backgroundColor: value ? Colors.green : Colors.grey,
-          behavior: SnackBarBehavior.floating,
-          duration: const Duration(seconds: 3),
+    if (value && !ativo) {
+      _mensagem(
+        'Sem permissão para notificações, os lembretes ficam desativados.',
+        action: SnackBarAction(
+          label: 'Abrir ajustes',
+          onPressed: _notificationService.abrirConfiguracoesDoSistema,
         ),
       );
+      return;
     }
+    _mensagem(
+      ativo
+          ? 'Lembretes ativados para a véspera às $_horario'
+          : 'Lembretes desativados.',
+    );
   }
 
-  /// Abre o seletor de dia do mês em formato de calendário
+  /// Abre o seletor de horário do aviso
   Future<void> _selecionarHorario() async {
     final horario = await showTimePicker(
       context: context,
@@ -204,135 +219,81 @@ class _ConfiguracoesPageState extends State<ConfiguracoesPage> {
         _minutoLembrete = horario.minute;
       });
       await _notificationService.updateReminderSchedule(
-        _diaLembrete,
         _horaLembrete,
         _minutoLembrete,
       );
-      _mostrarSnackConfirmacao();
-    }
-  }
-
-  void _mostrarSnackConfirmacao() {
-    if (mounted && _lembreteAtivo) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text(
-            'Lembrete atualizado: na véspera às ${_horaLembrete.toString().padLeft(2, '0')}:${_minutoLembrete.toString().padLeft(2, '0')}',
-          ),
-          backgroundColor: Colors.green,
-          behavior: SnackBarBehavior.floating,
-        ),
-      );
+      if (_lembreteAtivo) {
+        _mensagem('Lembrete atualizado: na véspera às $_horario');
+      }
     }
   }
 
   /// Envia uma notificação de teste
   Future<void> _enviarNotificacaoTeste() async {
     await _notificationService.showTestNotification();
-
-    if (mounted) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('Notificação de teste enviada!'),
-          behavior: SnackBarBehavior.floating,
-          duration: Duration(seconds: 2),
-        ),
-      );
-    }
+    _mensagem('Notificação de teste enviada!');
   }
 
   /// Exporta os dados para CSV
   Future<void> _exportarDados() async {
-    try {
-      // Pergunta o ano de referência
-      final anoAtual = DateTime.now().year;
-      final ano = await _selecionarAnoExportacao(anoAtual);
+    final ano = await _selecionarAno(
+      'Selecione o ano inicial para a exportação.\n'
+      'O período será de Abril do ano selecionado até Abril do ano seguinte.',
+    );
+    if (ano == null) return;
 
-      if (ano == null) return;
-
-      // Mostra loading
-      if (mounted) {
-        showDialog(
-          context: context,
-          barrierDismissible: false,
-          builder: (context) =>
-              const Center(child: CircularProgressIndicator()),
-        );
+    String? filePath;
+    await _ocupado(() async {
+      try {
+        filePath = await _csvService.exportarParaCsv(anoInicio: ano);
+      } catch (e) {
+        _mensagem('Erro ao exportar: $e');
       }
+    });
+    final path = filePath;
+    if (path == null || !mounted) return;
 
-      final filePath = await _csvService.exportarParaCsv(anoInicio: ano);
-
-      if (mounted) Navigator.pop(context); // Fecha loading
-
-      // Oferece opções: compartilhar ou salvar
-      if (mounted) {
-        showModalBottomSheet(
-          context: context,
-          builder: (context) => SafeArea(
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                ListTile(
-                  leading: const Icon(Icons.share),
-                  title: const Text('Compartilhar arquivo'),
-                  onTap: () async {
-                    Navigator.pop(context);
-                    await SharePlus.instance.share(
-                      ShareParams(
-                        files: [XFile(filePath)],
-                        text: 'Planilha de gastos FinanTech',
-                      ),
-                    );
-                  },
-                ),
-                ListTile(
-                  leading: const Icon(Icons.folder_open),
-                  title: const Text('Abrir localização'),
-                  subtitle: Text(
-                    filePath,
-                    style: const TextStyle(fontSize: 12),
+    await showModalBottomSheet<void>(
+      context: context,
+      builder: (sheetContext) => SafeArea(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            ListTile(
+              leading: const Icon(Icons.share),
+              title: const Text('Compartilhar arquivo'),
+              onTap: () async {
+                Navigator.pop(sheetContext);
+                await SharePlus.instance.share(
+                  ShareParams(
+                    files: [XFile(path)],
+                    text: 'Planilha de gastos do Diazen',
                   ),
-                  onTap: () {
-                    Navigator.pop(context);
-                    ScaffoldMessenger.of(context).showSnackBar(
-                      SnackBar(
-                        content: Text('Arquivo salvo em: $filePath'),
-                        duration: const Duration(seconds: 5),
-                      ),
-                    );
-                  },
-                ),
-              ],
+                );
+              },
             ),
-          ),
-        );
-      }
-    } catch (e) {
-      if (mounted) {
-        try {
-          Navigator.pop(context);
-        } catch (_) {}
-      }
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text('Erro ao exportar: $e'),
-            backgroundColor: Colors.red,
-          ),
-        );
-      }
-    }
+            ListTile(
+              leading: const Icon(Icons.folder_open),
+              title: const Text('Abrir localização'),
+              subtitle: Text(path, style: const TextStyle(fontSize: 12)),
+              onTap: () {
+                Navigator.pop(sheetContext);
+                _mensagem('Arquivo salvo em: $path');
+              },
+            ),
+          ],
+        ),
+      ),
+    );
   }
 
-  Future<int?> _selecionarAnoExportacao(int anoAtual) async {
+  Future<int?> _selecionarAno(String explicacao) async {
+    final anoAtual = DateTime.now().year;
     return await showDialog<int>(
       context: context,
       builder: (context) => AlertDialog(
         title: const Text('Ano de referência'),
-        content: const Text(
-          'Selecione o ano inicial para a exportação.\n'
-          'O período será de Abril do ano selecionado até Abril do ano seguinte.',
-        ),
+        content: Text(explicacao),
         actions: [
           TextButton(
             onPressed: () => Navigator.pop(context),
@@ -352,106 +313,79 @@ class _ConfiguracoesPageState extends State<ConfiguracoesPage> {
 
   /// Importa dados de um arquivo CSV
   Future<void> _importarDados() async {
+    String conteudo;
     try {
-      // Abre o seletor de arquivo
       final result = await FilePicker.pickFiles(
         type: FileType.custom,
         allowedExtensions: ['csv'],
       );
-
       if (result.isEmpty) return;
-
-      final file = File(result.single.path!);
-      final content = await file.readAsString();
-
-      // Pergunta o ano de referência
-      final anoAtual = DateTime.now().year;
-      final ano = await _selecionarAnoImportacao(anoAtual);
-
-      if (ano == null) return;
-
-      // Mostra loading
-      if (mounted) {
-        showDialog(
-          context: context,
-          barrierDismissible: false,
-          builder: (context) =>
-              const Center(child: CircularProgressIndicator()),
-        );
+      final path = result.single.path;
+      if (path == null) {
+        _mensagem('Não foi possível acessar o arquivo escolhido.');
+        return;
       }
-
-      final importados = await _csvService.importarDeCsv(
-        content,
-        anoInicio: ano,
-      );
-
-      if (mounted) Navigator.pop(context); // Fecha loading
-
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text('$importados gastos importados com sucesso!'),
-            backgroundColor: Colors.green,
-            behavior: SnackBarBehavior.floating,
-          ),
-        );
-      }
+      // UTF-8 ou, se inválido, Latin-1 (CSV salvo pelo Excel no Windows).
+      conteudo = CsvService.decodificar(await File(path).readAsBytes());
     } catch (e) {
-      if (mounted) {
-        try {
-          Navigator.pop(context);
-        } catch (_) {}
-      }
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text('Erro ao importar: $e'),
-            backgroundColor: Colors.red,
-          ),
-        );
-      }
+      _mensagem('Não foi possível ler o arquivo: $e');
+      return;
     }
+    if (!mounted) return;
+
+    final ano = await _selecionarAno(
+      'Selecione o ano inicial para a importação.\n'
+      'Abril será associado ao ano selecionado, '
+      'e Janeiro a Abril seguinte ao ano posterior. '
+      'Os valores do arquivo substituem os do app; '
+      'um backup é criado antes.',
+    );
+    if (ano == null) return;
+
+    await _ocupado(() async {
+      try {
+        final resultado = await _csvService.importarDeCsv(
+          conteudo,
+          anoInicio: ano,
+        );
+        _mensagem(resultado.mensagem);
+        if (resultado.rejeitados > 0 && mounted) {
+          await _mostrarRejeitadas(resultado.rejeitadas);
+        }
+      } catch (e) {
+        _mensagem('Erro ao importar: $e');
+      }
+    });
   }
 
-  Future<int?> _selecionarAnoImportacao(int anoAtual) async {
-    return await showDialog<int>(
-      context: context,
-      builder: (context) => AlertDialog(
-        title: const Text('Ano de referência'),
-        content: const Text(
-          'Selecione o ano inicial para a importação.\n'
-          'Abril será associado ao ano selecionado, '
-          'e Janeiro a Março ao ano seguinte.',
+  Future<void> _mostrarRejeitadas(List<String> rejeitadas) => showDialog<void>(
+    context: context,
+    builder: (ctx) => AlertDialog(
+      title: Text('${rejeitadas.length} valores não importados'),
+      content: SingleChildScrollView(
+        child: Text(
+          'Estas células não têm um valor em reais válido e foram ignoradas:\n\n${rejeitadas.join('\n')}',
         ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(context),
-            child: const Text('Cancelar'),
-          ),
-          ...List.generate(3, (i) {
-            final ano = anoAtual - 1 + i;
-            return TextButton(
-              onPressed: () => Navigator.pop(context, ano),
-              child: Text('$ano'),
-            );
-          }),
-        ],
       ),
-    );
-  }
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.pop(ctx),
+          child: const Text('Entendi'),
+        ),
+      ],
+    ),
+  );
 
   @override
   Widget build(BuildContext context) {
-    final time =
-        '${_horaLembrete.toString().padLeft(2, '0')}:${_minutoLembrete.toString().padLeft(2, '0')}';
     return Scaffold(
       appBar: AppBar(title: const Text('Ajustes')),
       body: _isLoading
           ? const Center(child: CircularProgressIndicator())
           : SettingsContent(
               enabled: _lembreteAtivo,
-              time: time,
-              busy: _backupBusy,
+              time: _horario,
+              busy: _busy,
               onToggle: (value) =>
                   _runSettingAction(() => _toggleLembrete(value)),
               onTime: () => _runSettingAction(_selecionarHorario),
@@ -470,7 +404,7 @@ class _ConfiguracoesPageState extends State<ConfiguracoesPage> {
       await action();
     } catch (error) {
       await _carregarConfiguracoes();
-      _mensagemBackup(error.toString());
+      _mensagem(error is StateError ? error.message : error.toString());
     }
   }
 }

@@ -51,13 +51,13 @@ void main() {
       expect(tester.takeException(), isNull);
       await expectLater(
         find.byKey(const ValueKey('planning-preview')),
-        matchesGoldenFile('../artifacts/versao-1.2/previews/$name.png'),
+        matchesGoldenFile('../artifacts/versao-2.0/previews/planejamento-$name.png'),
       );
     }
 
     await tester.pumpWidget(frame());
-    await capture('01-visao-geral');
-    await tester.tap(find.text('Lançamentos').last);
+    await capture('01-inicio');
+    await tester.tap(find.text('Contas').last);
     await capture('02-categorias-e-parcelas');
     final action = find.byTooltip('Ações de Notebook');
     await tester.scrollUntilVisible(
@@ -65,23 +65,24 @@ void main() {
       100,
       scrollable: find.byType(Scrollable).first,
     );
-    await tester.drag(
-      find.byType(CustomScrollView).first,
-      const Offset(0, -200),
-    );
     await tester.pumpAndSettle();
     await tester.tap(action);
     await tester.pumpAndSettle();
     await tester.tap(find.text('Ver parcelamento'));
     await capture('03-acompanhamento-parcelas');
-    await tester.pumpWidget(const SizedBox());
-    await tester.pumpWidget(frame());
+    await tester.tap(find.text('Marcar parcela 1 como paga'));
+    await capture('04-parcela-paga');
+    await tester.tap(find.byTooltip('Voltar'));
     await tester.pumpAndSettle();
-    await tester.scrollUntilVisible(
-      find.text('Próximos meses'),
-      160,
-      scrollable: find.byType(Scrollable).first,
-    );
-    await capture('04-proximos-meses');
+    await tester.tap(find.text('Futuro').last);
+    await capture('05-proximos-meses');
+    await tester.tap(find.bySemanticsLabel(RegExp('^Fevereiro 2027')));
+    await capture('06-proximos-meses-fevereiro');
+    await tester.tap(find.byTooltip('Novo lançamento'));
+    await tester.pumpAndSettle();
+    await tester.enterText(find.byType(TextFormField).first, '300000');
+    await tester.enterText(find.byType(TextFormField).at(1), 'Geladeira');
+    await tester.tap(find.text('Parcelada'));
+    await capture('07-novo-parcelado');
   });
 }

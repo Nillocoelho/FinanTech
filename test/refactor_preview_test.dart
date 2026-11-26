@@ -28,7 +28,7 @@ void main() {
       await expectLater(
         find.byKey(const ValueKey('preview')),
         matchesGoldenFile(
-          '../artifacts/refatoracao-finantech/previews/$name.png',
+          '../artifacts/versao-2.0/previews/$name.png',
         ),
       );
     }
@@ -40,10 +40,10 @@ void main() {
     await tester.pumpWidget(
       frame(GastosPage(repository: repo, now: () => fixtureNow)),
     );
-    await capture('01-visao-geral');
-    await tester.tap(find.text('Lançamentos').last);
-    await capture('02-lancamentos');
-    await tester.tap(find.byTooltip('Adicionar gasto'));
+    await capture('01-inicio');
+    await tester.tap(find.text('Contas').last);
+    await capture('02-contas');
+    await tester.tap(find.byTooltip('Novo lançamento'));
     await capture('03-novo-lancamento');
     await tester.pumpWidget(const SizedBox());
     await tester.pumpWidget(frame(const ConfiguracoesPage()));
@@ -68,6 +68,7 @@ void main() {
             period: fixtureNow,
             origins: const ['Aluguel', 'Nubank'],
             expense: repo.expenses.first,
+            now: fixtureNow,
           ),
         ),
       ),
@@ -78,7 +79,7 @@ void main() {
       frame(GastosPage(repository: repo, now: () => fixtureNow)),
     );
     await tester.pumpAndSettle();
-    await tester.tap(find.text('Ver resumo'));
-    await capture('07-resumo-mensal');
+    await tester.drag(find.byType(ListView).first, const Offset(0, -700));
+    await capture('07-inicio-categorias');
   });
 }

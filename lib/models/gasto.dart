@@ -3,14 +3,21 @@
 /// Cada gasto possui uma origem (a quem se deve), um valor,
 /// um status de pagamento, e está associado a um mês/ano específico.
 class Gasto {
-  /// Identificador único do gasto (auto-incrementado pelo SQLite)
+  /// Identificador único do gasto (auto-incrementado pelo SQLite).
+  ///
+  /// Valores negativos indicam uma ocorrência de recorrência projetada em
+  /// memória (ainda não gravada); o repositório grava a ocorrência quando
+  /// alguma ação é feita sobre ela.
   final int? id;
 
   /// Origem da dívida (ex: "Santander", "Inter", "Pai")
   final String origem;
 
-  /// Valor da dívida em reais
-  final double valor;
+  /// Valor da dívida em centavos inteiros (evita erro de ponto flutuante).
+  final int valorCentavos;
+
+  /// Valor da dívida em reais (derivado de [valorCentavos]).
+  double get valor => valorCentavos / 100;
 
   /// Indica se a dívida foi paga (true = paga, false = em aberto)
   final bool pago;
@@ -36,6 +43,9 @@ class Gasto {
 
   bool get parcelado => parcelaGrupo != null;
 
+  /// Ocorrência de recorrência calculada em memória, ainda não gravada.
+  bool get projetado => id != null && id! < 0;
+
   bool vencidoEm(DateTime agora) {
     final data = vencimento;
     if (pago || data == null) return false;
@@ -46,6 +56,13 @@ class Gasto {
     ).isBefore(DateTime(agora.year, agora.month, agora.day));
   }
 
+  /// Converte reais para centavos, rejeitando valores não finitos.
+  static int paraCentavos(double valor) {
+    if (!valor.isFinite) throw ArgumentError.value(valor, 'valor');
+    return (valor * 100).round();
+  }
+
+  /// Informe [valor] (reais) ou [valorCentavos]; os centavos têm prioridade.
   Gasto({
     this.id,
     this.vencimento,
@@ -56,12 +73,23 @@ class Gasto {
     this.recorrenciaId,
     this.recorrenciaAtiva = true,
     required this.origem,
-    required this.valor,
+    double? valor,
+    int? valorCentavos,
     required this.pago,
     required this.mes,
     required this.ano,
     required this.createdAt,
-  });
+  }) : assert(valor != null || valorCentavos != null),
+       valorCentavos = valorCentavos ?? paraCentavos(valor!);
+
+  /// Lê os centavos de uma linha do banco ou de um backup.
+  ///
+  /// Backups antigos e bancos anteriores à v4 têm apenas `valor` (REAL).
+  static int centavosDoMapa(Map<String, dynamic> map) {
+    final centavos = map['valorCentavos'];
+    if (centavos is int) return centavos;
+    return paraCentavos((map['valor'] as num).toDouble());
+  }
 
   /// Cria uma instância de [Gasto] a partir de um Map (vindo do SQLite)
   ///
@@ -77,7 +105,7 @@ class Gasto {
       recorrenciaAtiva: map['recorrenciaAtiva'] != 0,
       vencimento: DateTime.tryParse(map['vencimento'] as String? ?? ''),
       origem: map['origem'] as String,
-      valor: (map['valor'] as num).toDouble(),
+      valorCentavos: centavosDoMapa(map),
       pago: (map['pago'] as int) == 1, // Converte 0/1 para false/true
       mes: map['mes'] as int,
       ano: map['ano'] as int,
@@ -88,11 +116,14 @@ class Gasto {
   /// Converte a instância de [Gasto] para um Map (para salvar no SQLite)
   ///
   /// O campo 'pago' é convertido de bool para INTEGER (0 ou 1).
+  /// `valor` continua sendo gravado para que backups novos sigam legíveis
+  /// por versões anteriores do app.
   Map<String, dynamic> toMap() {
     return {
       if (id != null) 'id': id, // Só inclui o id se não for null
       'origem': origem,
       'valor': valor,
+      'valorCentavos': valorCentavos,
       'pago': pago ? 1 : 0, // Converte true/false para 1/0
       'mes': mes,
       'ano': ano,
@@ -113,6 +144,7 @@ class Gasto {
     int? id,
     String? origem,
     double? valor,
+    int? valorCentavos,
     bool? pago,
     int? mes,
     int? ano,
@@ -135,7 +167,9 @@ class Gasto {
       recorrenciaAtiva: recorrenciaAtiva ?? this.recorrenciaAtiva,
       vencimento: vencimento ?? this.vencimento,
       origem: origem ?? this.origem,
-      valor: valor ?? this.valor,
+      valorCentavos:
+          valorCentavos ??
+          (valor != null ? paraCentavos(valor) : this.valorCentavos),
       pago: pago ?? this.pago,
       mes: mes ?? this.mes,
       ano: ano ?? this.ano,

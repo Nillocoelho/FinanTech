@@ -4,6 +4,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'package:finantech/main.dart';
 import 'package:finantech/pages/gastos_page.dart';
 import 'package:finantech/models/gasto.dart';
+import 'package:finantech/widgets/expense_editor.dart';
 
 import 'support/finance_fixture.dart';
 import 'support/load_fonts.dart';
@@ -35,9 +36,10 @@ void main() {
   ) async {
     await open(tester, PreviewRepository());
     expect(find.text('R\$ 2.736,80'), findsOneWidget);
-    expect(find.text('R\$ 3.377,05'), findsOneWidget);
+    // Total appears in the hero and in the category breakdown.
+    expect(find.text('R\$ 3.377,05'), findsWidgets);
     expect(find.text('R\$ 640,25'), findsWidgets);
-    expect(find.text('1 conta vencida'), findsOneWidget);
+    expect(find.text('Aluguel venceu há 2 dias'), findsOneWidget);
     expect(tester.takeException(), isNull);
   });
 
@@ -45,12 +47,15 @@ void main() {
     tester,
   ) async {
     await open(tester, PreviewRepository());
-    await tester.tap(find.text('Lançamentos').last);
+    await tester.tap(find.text('Contas').last);
     await tester.pumpAndSettle();
     await tester.enterText(find.byType(TextField), 'Nubank');
+    await tester.pump(const Duration(milliseconds: 200));
     await tester.pumpAndSettle();
     expect(find.text('Nubank'), findsNWidgets(2));
     expect(find.text('Aluguel'), findsNothing);
+    await tester.ensureVisible(find.text('Pagas'));
+    await tester.pumpAndSettle();
     await tester.tap(find.text('Pagas'));
     await tester.pumpAndSettle();
     expect(find.text('Nenhuma conta encontrada'), findsOneWidget);
@@ -76,7 +81,7 @@ void main() {
     await tester.tap(find.text('Marcar como pago'));
     await tester.pumpAndSettle();
     expect(repo.expenses.first.pago, isTrue);
-    expect(find.text('1 conta vencida'), findsNothing);
+    expect(find.text('Aluguel venceu há 2 dias'), findsNothing);
     expect(find.text('R\$ 1.286,80'), findsOneWidget);
   });
 
@@ -91,14 +96,15 @@ void main() {
 
   testWidgets('editor validates amount, name and due date', (tester) async {
     await open(tester, PreviewRepository());
-    await tester.tap(find.byTooltip('Adicionar gasto'));
+    await tester.tap(find.byTooltip('Novo lançamento'));
     await tester.pumpAndSettle();
-    await tester.ensureVisible(find.text('Adicionar lançamento'));
-    await tester.tap(find.text('Adicionar lançamento'));
+    // The due date starts on "Hoje", so it can never be missing.
+    expect(find.text('Hoje'), findsOneWidget);
+    await tester.tap(find.text('Adicionar conta'));
     await tester.pumpAndSettle();
-    expect(find.text('Informe um valor maior que zero.'), findsOneWidget);
+    expect(find.text('Informe um valor maior que zero.'), findsWidgets);
     expect(find.text('Informe o nome da conta.'), findsOneWidget);
-    expect(find.text('Selecione o vencimento.'), findsOneWidget);
+    expect(find.byType(ExpenseEditor), findsOneWidget);
     expect(tester.takeException(), isNull);
   });
 
@@ -107,25 +113,26 @@ void main() {
     (tester) async {
       final repo = PreviewRepository();
       await open(tester, repo);
-      await tester.tap(find.byTooltip('Adicionar gasto'));
+      await tester.tap(find.byTooltip('Novo lançamento'));
       await tester.pumpAndSettle();
       await tester.enterText(find.byType(TextFormField).at(0), '10000');
       await tester.enterText(find.byType(TextFormField).at(1), 'Curso');
-      await tester.tap(find.text('Selecione uma data'));
+      await tester.tap(find.text('Outra'));
       await tester.pumpAndSettle();
       await tester.tap(find.text('15').last);
       await tester.tap(find.text('OK'));
       await tester.pumpAndSettle();
-      await tester.ensureVisible(
-        find.widgetWithText(SwitchListTile, 'Dividir em parcelas'),
-      );
-      await tester.tap(
-        find.widgetWithText(SwitchListTile, 'Dividir em parcelas'),
-      );
+      await tester.ensureVisible(find.text('Parcelada'));
+      await tester.tap(find.text('Parcelada'));
       await tester.pumpAndSettle();
-      await tester.enterText(find.byType(TextFormField).at(2), '3');
-      await tester.ensureVisible(find.text('Adicionar lançamento'));
-      await tester.tap(find.text('Adicionar lançamento'));
+      final fewer = find.byTooltip('Menos parcelas');
+      await tester.ensureVisible(fewer);
+      for (var i = 10; i > 3; i--) {
+        await tester.tap(fewer);
+        await tester.pump();
+      }
+      expect(find.text('3×'), findsOneWidget);
+      await tester.tap(find.text('Adicionar 3 parcelas'));
       await tester.pumpAndSettle();
       final created = repo.expenses.where((g) => g.origem == 'Curso').toList();
       expect(created.length, 3);
@@ -143,7 +150,7 @@ void main() {
   testWidgets('deletion requires confirmation', (tester) async {
     final repo = PreviewRepository();
     await open(tester, repo);
-    await tester.tap(find.text('Lançamentos').last);
+    await tester.tap(find.text('Contas').last);
     await tester.pumpAndSettle();
     await tester.tap(find.byTooltip('Ações de Aluguel'));
     await tester.pumpAndSettle();
@@ -167,11 +174,9 @@ void main() {
     final repo = PreviewRepository();
     repo.expenses[0] = repo.expenses[0].copyWith(categoria: 'Moradia');
     await open(tester, repo);
-    await tester.tap(find.text('Lançamentos').last);
+    await tester.tap(find.text('Contas').last);
     await tester.pumpAndSettle();
-    await tester.tap(find.text('Todas as categorias'));
-    await tester.pumpAndSettle();
-    await tester.tap(find.text('Moradia').last);
+    await tester.tap(find.bySemanticsLabel('Categoria Moradia'));
     await tester.pumpAndSettle();
     expect(find.text('Aluguel'), findsOneWidget);
     expect(find.text('Energia'), findsNothing);
@@ -183,28 +188,27 @@ void main() {
   ) async {
     final repo = PreviewRepository();
     await open(tester, repo);
-    await tester.tap(find.byTooltip('Adicionar gasto'));
+    await tester.tap(find.byTooltip('Novo lançamento'));
     await tester.pumpAndSettle();
     await tester.enterText(find.byType(TextFormField).at(0), '12000');
     await tester.enterText(find.byType(TextFormField).at(1), 'Streaming');
-    await tester.tap(find.text('Sem categoria').last);
+    await tester.ensureVisible(find.text('Assinaturas'));
+    await tester.tap(find.text('Assinaturas'));
     await tester.pumpAndSettle();
-    await tester.tap(find.text('Assinaturas').last);
-    await tester.pumpAndSettle();
-    await tester.tap(find.text('Selecione uma data'));
+    await tester.tap(find.text('Outra'));
     await tester.pumpAndSettle();
     await tester.tap(find.text('15').last);
     await tester.tap(find.text('OK'));
     await tester.pumpAndSettle();
-    await tester.ensureVisible(find.text('Dividir em parcelas'));
-    await tester.tap(find.text('Dividir em parcelas'));
+    await tester.ensureVisible(find.text('Parcelada'));
+    await tester.tap(find.text('Parcelada'));
     await tester.pumpAndSettle();
-    await tester.ensureVisible(find.text('Repetir todo mês'));
-    await tester.tap(find.text('Repetir todo mês'));
+    expect(find.byTooltip('Mais parcelas'), findsOneWidget);
+    await tester.tap(find.text('Mensal'));
     await tester.pumpAndSettle();
-    expect(find.text('Quantidade de parcelas'), findsNothing);
-    await tester.ensureVisible(find.text('Adicionar lançamento'));
-    await tester.tap(find.text('Adicionar lançamento'));
+    // The options are exclusive: choosing Mensal hides the installments.
+    expect(find.byTooltip('Mais parcelas'), findsNothing);
+    await tester.tap(find.text('Adicionar conta mensal'));
     await tester.pumpAndSettle();
     expect(repo.rules.single.categoria, 'Assinaturas');
     expect(repo.expenses.where((g) => g.recorrenciaId != null).length, 12);
@@ -232,7 +236,7 @@ void main() {
     final first = repo.expenses.firstWhere((g) => g.parcelado);
     await repo.atualizarPago(first.id!, true);
     await open(tester, repo);
-    await tester.tap(find.text('Lançamentos').last);
+    await tester.tap(find.text('Contas').last);
     await tester.pumpAndSettle();
     final action = find.byTooltip('Ações de Notebook');
     await tester.scrollUntilVisible(
@@ -244,9 +248,11 @@ void main() {
     await tester.pumpAndSettle();
     await tester.tap(find.text('Ver parcelamento'));
     await tester.pumpAndSettle();
+    expect(find.text('Falta pagar'), findsOneWidget);
     expect(find.text('R\$ 200,00'), findsOneWidget);
-    expect(find.text('1 paga · 2 em aberto'), findsOneWidget);
-    expect(find.text('Parcela 3 de 3'), findsOneWidget);
+    expect(find.text('1 de 3 pagas'), findsOneWidget);
+    expect(find.text('Janeiro 2027'), findsOneWidget);
+    expect(find.text('Marcar parcela 2 como paga'), findsOneWidget);
     expect(tester.takeException(), isNull);
   });
 

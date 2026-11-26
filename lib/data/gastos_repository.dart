@@ -1,51 +1,133 @@
-import '../services/notification_service.dart';
-
+import 'dart:async';
 import 'dart:math';
-
-import '../models/recurring_expense.dart';
-import '../utils/installment_helper.dart';
 
 import 'package:sqflite/sqflite.dart';
 
 import '../models/gasto.dart';
+import '../models/recurring_expense.dart';
+import '../utils/installment_helper.dart';
 import 'database_helper.dart';
 
 /// Repositório responsável por todas as operações de CRUD na tabela de gastos.
 ///
 /// Esta classe abstrai a lógica de acesso ao banco de dados, fornecendo
 /// métodos de alto nível para manipular os gastos.
+///
+/// O repositório não conhece os lembretes: cada gravação emite um evento em
+/// [changes], e a camada do app decide quando ressincronizar (com debounce).
 class GastosRepository {
   final DatabaseHelper _databaseHelper = DatabaseHelper();
+
+  /// Meses gravados à frente do mês atual (o atual + 11). Além disso, as
+  /// recorrências são apenas projetadas em memória.
+  static const int mesesMaterializados = 12;
+
+  static final StreamController<void> _changes =
+      StreamController<void>.broadcast();
+
+  /// Emite um evento depois de cada gravação concluída.
+  static Stream<void> get changes => _changes.stream;
+
+  /// Avisa os ouvintes de [changes]; use após gravações feitas fora do
+  /// repositório (restauração de backup, importação).
+  static void notificarAlteracao() => _changes.add(null);
+
+  // Ocorrências projetadas recebem ids negativos estáveis durante a execução,
+  // para que a interface possa pagar, editar ou excluir como qualquer gasto.
+  static final Map<int, ({String regra, int mes})> _projecoes = {};
+  static final Map<String, int> _idsProjecao = {};
+
+  static int _idProjecao(String regra, int mes) =>
+      _idsProjecao.putIfAbsent('$regra:$mes', () {
+        final id = -(_idsProjecao.length + 1);
+        _projecoes[id] = (regra: regra, mes: mes);
+        return id;
+      });
 
   /// Insere um novo gasto no banco de dados
   ///
   /// Recebe um objeto [Gasto] e o persiste no SQLite.
   /// O campo 'id' será gerado automaticamente pelo banco.
+  /// Um conflito com os índices únicos de parcela/recorrência gera erro em vez
+  /// de substituir silenciosamente uma linha existente.
   Future<int> insertGasto(Gasto gasto) async {
     final db = await _databaseHelper.database;
 
     final result = await db.insert(
       DatabaseHelper.tableGastos,
       gasto.toMap(),
-      conflictAlgorithm: ConflictAlgorithm.replace,
+      conflictAlgorithm: ConflictAlgorithm.abort,
     );
-    await NotificationService().refreshAfterChange();
+    notificarAlteracao();
     return result;
   }
 
   /// Retorna todos os gastos de um mês/ano específico
   ///
   /// Os gastos são ordenados pela data de criação (mais recentes primeiro).
+  /// Meses além da janela gravada incluem as recorrências ativas projetadas
+  /// (com id negativo, ver [Gasto.projetado]).
   Future<List<Gasto>> getGastosDoMes(int mes, int ano) async {
     final db = await _databaseHelper.database;
 
-    final maps = await db.rawQuery('''SELECT gastos.*, recorrencias.ativo AS recorrenciaAtiva
+    final maps = await db.rawQuery(
+      '''SELECT gastos.*, recorrencias.ativo AS recorrenciaAtiva
       FROM gastos LEFT JOIN recorrencias ON gastos.recorrenciaId = recorrencias.id
-      WHERE gastos.mes = ? AND gastos.ano = ? ORDER BY gastos.createdAt DESC''', [mes, ano]);
+      WHERE gastos.mes = ? AND gastos.ano = ? ORDER BY gastos.createdAt DESC''',
+      [mes, ano],
+    );
 
-    // Converte a lista de Maps para lista de objetos Gasto
-    return List.generate(maps.length, (index) {
-      return Gasto.fromMap(maps[index]);
+    final gastos = maps.map(Gasto.fromMap).toList();
+    final index = monthIndex(ano, mes);
+    final clock = DateTime.now();
+    for (final rule in await _regrasProjetaveis(db, index)) {
+      gastos.add(
+        rule.occurrence(index, clock, id: _idProjecao(rule.id, index)),
+      );
+    }
+    return gastos;
+  }
+
+  /// Regras ativas cuja ocorrência do mês [index] ainda não foi gravada.
+  Future<List<RecurringExpense>> _regrasProjetaveis(
+    DatabaseExecutor db,
+    int index,
+  ) async {
+    if (index > monthIndex(2100, 12)) return const [];
+    return (await db.query(
+      DatabaseHelper.tableRecorrencias,
+      where: 'ativo = 1 AND proximoMes <= ? AND inicioMes <= ?',
+      whereArgs: [index, index],
+    )).map(RecurringExpense.fromMap).toList();
+  }
+
+  /// Grava a ocorrência projetada [id] (e os meses anteriores da regra, para
+  /// manter o cursor consistente) e devolve o id real.
+  Future<int> _idReal(int id) async {
+    if (id >= 0) return id;
+    final projecao = _projecoes[id];
+    if (projecao == null) {
+      throw StateError('Ocorrência projetada desconhecida: $id');
+    }
+    final db = await _databaseHelper.database;
+    return db.transaction((txn) async {
+      final rows = await txn.query(
+        DatabaseHelper.tableRecorrencias,
+        where: 'id = ?',
+        whereArgs: [projecao.regra],
+      );
+      if (rows.isEmpty) throw StateError('Recorrência não encontrada.');
+      final rule = RecurringExpense.fromMap(rows.single);
+      await _materializarRegras(txn, [rule], projecao.mes, DateTime.now());
+      final period = monthAt(projecao.mes);
+      final gravado = await txn.query(
+        DatabaseHelper.tableGastos,
+        columns: ['id'],
+        where: 'recorrenciaId = ? AND ano = ? AND mes = ?',
+        whereArgs: [rule.id, period.year, period.month],
+      );
+      if (gravado.isEmpty) throw StateError('Ocorrência não encontrada.');
+      return gravado.single['id'] as int;
     });
   }
 
@@ -54,15 +136,16 @@ class GastosRepository {
   /// [id] é o identificador do gasto a ser atualizado.
   /// [pago] indica se o gasto foi pago (true) ou não (false).
   Future<int> atualizarPago(int id, bool pago) async {
+    final realId = await _idReal(id);
     final db = await _databaseHelper.database;
 
     final result = await db.update(
       DatabaseHelper.tableGastos,
       {'pago': pago ? 1 : 0},
       where: 'id = ?',
-      whereArgs: [id],
+      whereArgs: [realId],
     );
-    await NotificationService().refreshAfterChange();
+    notificarAlteracao();
     return result;
   }
 
@@ -75,15 +158,14 @@ class GastosRepository {
 
     final result = await db.rawQuery(
       '''
-      SELECT COALESCE(SUM(valor), 0.0) as total
+      SELECT COALESCE(SUM(valorCentavos), 0) as total
       FROM ${DatabaseHelper.tableGastos}
       WHERE mes = ? AND ano = ? AND pago = 0
     ''',
       [mes, ano],
     );
 
-    // COALESCE garante que retorna 0.0 se não houver registros
-    return (result.first['total'] as num).toDouble();
+    return (result.first['total'] as num).toInt() / 100;
   }
 
   /// Retorna um mapa com o total de gastos não pagos por origem
@@ -97,7 +179,7 @@ class GastosRepository {
 
     final List<Map<String, dynamic>> result = await db.rawQuery(
       '''
-      SELECT origem, COALESCE(SUM(valor), 0.0) as total
+      SELECT origem, COALESCE(SUM(valorCentavos), 0) as total
       FROM ${DatabaseHelper.tableGastos}
       WHERE mes = ? AND ano = ? AND pago = 0
       GROUP BY origem
@@ -106,29 +188,25 @@ class GastosRepository {
       [mes, ano],
     );
 
-    // Converte o resultado para um Map<String, double>
-    final Map<String, double> totais = {};
-    for (final row in result) {
-      final origem = row['origem'] as String;
-      final total = (row['total'] as num).toDouble();
-      totais[origem] = total;
-    }
-
-    return totais;
+    return {
+      for (final row in result)
+        row['origem'] as String: (row['total'] as num).toInt() / 100,
+    };
   }
 
   /// Exclui um gasto pelo ID
   ///
   /// Retorna o número de linhas afetadas (1 se excluído com sucesso, 0 se não encontrado).
   Future<int> deleteGasto(int id) async {
+    final realId = await _idReal(id);
     final db = await _databaseHelper.database;
 
     final result = await db.delete(
       DatabaseHelper.tableGastos,
       where: 'id = ?',
-      whereArgs: [id],
+      whereArgs: [realId],
     );
-    await NotificationService().refreshAfterChange();
+    notificarAlteracao();
     return result;
   }
 
@@ -137,15 +215,16 @@ class GastosRepository {
   /// [gasto] deve conter o id do gasto a ser atualizado.
   /// Retorna o número de linhas afetadas.
   Future<int> updateGasto(Gasto gasto) async {
+    final realId = await _idReal(gasto.id!);
     final db = await _databaseHelper.database;
 
     final result = await db.update(
       DatabaseHelper.tableGastos,
-      gasto.toMap(),
+      gasto.copyWith(id: realId).toMap(),
       where: 'id = ?',
-      whereArgs: [gasto.id],
+      whereArgs: [realId],
     );
-    await NotificationService().refreshAfterChange();
+    notificarAlteracao();
     return result;
   }
 
@@ -183,8 +262,10 @@ class GastosRepository {
     return Gasto.fromMap(result.first);
   }
 
-  /// Insere um novo gasto ou soma seu valor a um gasto existente da mesma origem/mês/ano.
+  /// Insere um novo gasto ou soma seu valor a um gasto existente da mesma
+  /// origem/mês/ano/categoria **ainda em aberto**.
   ///
+  /// Um lançamento já pago nunca é alterado: nesse caso um novo é inserido.
   /// Retorna `somado = true` quando um registro existente foi atualizado.
   Future<({bool somado, Gasto gasto})> salvarSomandoSeExistir(
     Gasto gasto,
@@ -192,7 +273,8 @@ class GastosRepository {
     final db = await _databaseHelper.database;
     final matches = await db.query(
       DatabaseHelper.tableGastos,
-      where: 'LOWER(origem) = LOWER(?) AND mes = ? AND ano = ? AND categoria = ? AND parcelaGrupo IS NULL AND recorrenciaId IS NULL',
+      where:
+          'LOWER(origem) = LOWER(?) AND mes = ? AND ano = ? AND categoria = ? AND pago = 0 AND parcelaGrupo IS NULL AND recorrenciaId IS NULL',
       whereArgs: [gasto.origem.trim(), gasto.mes, gasto.ano, gasto.categoria],
       orderBy: 'createdAt DESC, id DESC',
       limit: 1,
@@ -207,9 +289,8 @@ class GastosRepository {
     }
 
     final gastoAtualizado = gastoExistente.copyWith(
-      valor: gastoExistente.valor + gasto.valor,
+      valorCentavos: gastoExistente.valorCentavos + gasto.valorCentavos,
       vencimento: gasto.vencimento,
-      pago: false,
     );
     await updateGasto(gastoAtualizado);
     return (somado: true, gasto: gastoAtualizado);
@@ -262,9 +343,9 @@ class GastosRepository {
 
     final result = await db.rawQuery(
       '''
-      SELECT 
-        COALESCE(SUM(CASE WHEN pago = 0 THEN valor ELSE 0 END), 0.0) as totalEmAberto,
-        COALESCE(SUM(CASE WHEN pago = 1 THEN valor ELSE 0 END), 0.0) as totalPago,
+      SELECT
+        COALESCE(SUM(CASE WHEN pago = 0 THEN valorCentavos ELSE 0 END), 0) as totalEmAberto,
+        COALESCE(SUM(CASE WHEN pago = 1 THEN valorCentavos ELSE 0 END), 0) as totalPago,
         COALESCE(SUM(CASE WHEN pago = 0 THEN 1 ELSE 0 END), 0) as quantidadeEmAberto,
         COALESCE(SUM(CASE WHEN pago = 1 THEN 1 ELSE 0 END), 0) as quantidadePaga
       FROM ${DatabaseHelper.tableGastos}
@@ -275,8 +356,8 @@ class GastosRepository {
 
     final row = result.first;
     return {
-      'totalEmAberto': (row['totalEmAberto'] as num).toDouble(),
-      'totalPago': (row['totalPago'] as num).toDouble(),
+      'totalEmAberto': (row['totalEmAberto'] as num).toInt() / 100,
+      'totalPago': (row['totalPago'] as num).toInt() / 100,
       'quantidadeEmAberto': (row['quantidadeEmAberto'] as num).toInt(),
       'quantidadePaga': (row['quantidadePaga'] as num).toInt(),
     };
@@ -288,13 +369,15 @@ class GastosRepository {
   Future<void> criarParcelamento(Gasto base, int quantidade) async {
     if (quantidade < 2 ||
         quantidade > 120 ||
-        !base.valor.isFinite ||
-        (base.valor * 100).round() < quantidade ||
+        base.valorCentavos < quantidade ||
         base.vencimento == null) {
       throw ArgumentError('Invalid installment plan');
     }
     final group = _seriesId();
-    final values = InstallmentHelper.splitAmount(base.valor, quantidade);
+    final values = InstallmentHelper.splitCentavos(
+      base.valorCentavos,
+      quantidade,
+    );
     final db = await _databaseHelper.database;
     await db.transaction((txn) async {
       final batch = txn.batch();
@@ -306,7 +389,7 @@ class GastosRepository {
           DatabaseHelper.tableGastos,
           Gasto(
             origem: base.origem,
-            valor: values[i],
+            valorCentavos: values[i],
             pago: false,
             mes: period.mes,
             ano: period.ano,
@@ -325,7 +408,7 @@ class GastosRepository {
       }
       await batch.commit(noResult: true);
     });
-    await NotificationService().refreshAfterChange();
+    notificarAlteracao();
   }
 
   Future<List<Gasto>> getParcelas(String grupo) async {
@@ -338,8 +421,12 @@ class GastosRepository {
     )).map(Gasto.fromMap).toList();
   }
 
+  /// Último mês gravado: o mês de [clock] mais 11.
+  static int _horizonte(DateTime clock) =>
+      monthIndex(clock.year, clock.month) + mesesMaterializados - 1;
+
   Future<void> criarRecorrencia(Gasto base, {DateTime? now}) async {
-    if (base.vencimento == null || !base.valor.isFinite || base.valor <= 0) {
+    if (base.vencimento == null || base.valorCentavos <= 0) {
       throw ArgumentError('Invalid recurring expense');
     }
     final clock = now ?? DateTime.now();
@@ -347,7 +434,7 @@ class GastosRepository {
     final rule = RecurringExpense(
       id: _seriesId(),
       origem: base.origem,
-      valor: base.valor,
+      valorCentavos: base.valorCentavos,
       categoria: base.categoria,
       inicioMes: start,
       proximoMes: start,
@@ -357,27 +444,27 @@ class GastosRepository {
     );
     final db = await _databaseHelper.database;
     await db.transaction((txn) async {
-      await txn.insert(DatabaseHelper.tableRecorrencias, rule.toMap());
-      await _materialize(
-        txn,
-        max(start, monthIndex(clock.year, clock.month)) + 11,
-        clock,
+      await txn.insert(
+        DatabaseHelper.tableRecorrencias,
+        rule.toMap(),
+        conflictAlgorithm: ConflictAlgorithm.abort,
       );
+      await _materialize(txn, _horizonte(clock), clock);
     });
-    await NotificationService().refreshAfterChange();
+    notificarAlteracao();
   }
 
+  /// Grava as recorrências até hoje + 11 meses.
+  ///
+  /// Meses posteriores, como um mês distante aberto pelo usuário, não são
+  /// gravados: [getGastosDoMes] os projeta em memória.
   Future<void> prepararMes(int mes, int ano, {DateTime? now}) async {
     final clock = now ?? DateTime.now();
     final db = await _databaseHelper.database;
     final count = await db.transaction(
-      (txn) => _materialize(
-        txn,
-        max(monthIndex(ano, mes), monthIndex(clock.year, clock.month)) + 11,
-        clock,
-      ),
+      (txn) => _materialize(txn, _horizonte(clock), clock),
     );
-    if (count > 0) await NotificationService().refreshAfterChange();
+    if (count > 0) notificarAlteracao();
   }
 
   Future<int> _materialize(Transaction txn, int through, DateTime now) async {
@@ -387,10 +474,22 @@ class GastosRepository {
       where: 'ativo = 1 AND proximoMes <= ?',
       whereArgs: [limit],
     )).map(RecurringExpense.fromMap).toList();
+    return _materializarRegras(txn, rules, limit, now);
+  }
+
+  Future<int> _materializarRegras(
+    Transaction txn,
+    List<RecurringExpense> rules,
+    int through,
+    DateTime now,
+  ) async {
+    final limit = min(through, monthIndex(2100, 12));
+    final batch = txn.batch();
     var count = 0;
     for (final rule in rules) {
+      if (rule.proximoMes > limit) continue;
       for (var index = rule.proximoMes; index <= limit; index++) {
-        await txn.insert(
+        batch.insert(
           DatabaseHelper.tableGastos,
           rule.occurrence(index, now).toMap(),
           conflictAlgorithm: ConflictAlgorithm.ignore,
@@ -398,13 +497,14 @@ class GastosRepository {
         count++;
       }
       // A cursor prevents deleted occurrences from being recreated.
-      await txn.update(
+      batch.update(
         DatabaseHelper.tableRecorrencias,
         {'proximoMes': limit + 1},
         where: 'id = ?',
         whereArgs: [rule.id],
       );
     }
+    await batch.commit(noResult: true);
     return count;
   }
 
@@ -430,6 +530,7 @@ class GastosRepository {
         {
           'origem': edited.origem,
           'valor': edited.valor,
+          'valorCentavos': edited.valorCentavos,
           'categoria': edited.categoria,
           'diaVencimento': due.day,
           'deslocamentoVencimento': offset,
@@ -442,15 +543,17 @@ class GastosRepository {
         where: 'recorrenciaId = ? AND pago = 0 AND (ano * 12 + mes - 1) >= ?',
         whereArgs: [id, from],
       );
+      final batch = txn.batch();
       for (final row in rows) {
         final expense = Gasto.fromMap(row);
         final month = monthAt(monthIndex(expense.ano, expense.mes) + offset);
         final last = DateTime(month.year, month.month + 1, 0).day;
-        await txn.update(
+        batch.update(
           DatabaseHelper.tableGastos,
           {
             'origem': edited.origem,
             'valor': edited.valor,
+            'valorCentavos': edited.valorCentavos,
             'categoria': edited.categoria,
             'vencimento': DateTime(
               month.year,
@@ -462,8 +565,9 @@ class GastosRepository {
           whereArgs: [expense.id],
         );
       }
+      await batch.commit(noResult: true);
     });
-    await NotificationService().refreshAfterChange();
+    notificarAlteracao();
   }
 
   Future<void> encerrarRecorrencia(String id, int mes, int ano) async {
@@ -481,23 +585,29 @@ class GastosRepository {
         whereArgs: [id, monthIndex(ano, mes)],
       );
     });
-    await NotificationService().refreshAfterChange();
+    notificarAlteracao();
   }
 
   Future<Map<DateTime, double>> getCompromissosFuturos(int mes, int ano) async {
     final start = monthIndex(ano, mes) + 1;
     final db = await _databaseHelper.database;
     final rows = await db.rawQuery(
-      '''SELECT ano, mes, SUM(valor) AS total FROM gastos
+      '''SELECT ano, mes, SUM(valorCentavos) AS total FROM gastos
       WHERE pago = 0 AND (parcelaGrupo IS NOT NULL OR recorrenciaId IS NOT NULL)
       AND (ano * 12 + mes - 1) BETWEEN ? AND ? GROUP BY ano, mes''',
       [start, start + 2],
     );
-    final totals = {for (var i = 0; i < 3; i++) monthAt(start + i): 0.0};
+    final cents = {for (var i = 0; i < 3; i++) monthAt(start + i): 0};
     for (final row in rows) {
-      totals[DateTime(row['ano'] as int, row['mes'] as int)] =
-          (row['total'] as num).toDouble();
+      cents[DateTime(row['ano'] as int, row['mes'] as int)] =
+          (row['total'] as num).toInt();
     }
-    return totals;
+    // Meses ainda não gravados recebem as recorrências projetadas.
+    for (var i = 0; i < 3; i++) {
+      for (final rule in await _regrasProjetaveis(db, start + i)) {
+        cents.update(monthAt(start + i), (v) => v + rule.valorCentavos);
+      }
+    }
+    return cents.map((month, value) => MapEntry(month, value / 100));
   }
 }

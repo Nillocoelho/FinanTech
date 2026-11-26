@@ -5,14 +5,23 @@ class InstallmentHelper {
       throw ArgumentError('installmentCount must be greater than zero');
     }
 
-    final totalInCents = (totalAmount * 100).round();
+    return splitCentavos(
+      (totalAmount * 100).round(),
+      installmentCount,
+    ).map((cents) => cents / 100).toList();
+  }
+
+  /// Divide um total em centavos; o resto vai para as primeiras parcelas.
+  static List<int> splitCentavos(int totalInCents, int installmentCount) {
+    if (installmentCount <= 0) {
+      throw ArgumentError('installmentCount must be greater than zero');
+    }
     final baseInstallment = totalInCents ~/ installmentCount;
     final remainder = totalInCents % installmentCount;
-
-    return List.generate(installmentCount, (index) {
-      final cents = baseInstallment + (index < remainder ? 1 : 0);
-      return cents / 100;
-    });
+    return List.generate(
+      installmentCount,
+      (index) => baseInstallment + (index < remainder ? 1 : 0),
+    );
   }
 
   /// Avança um período mês/ano considerando virada de ano.

@@ -3,10 +3,10 @@ import 'dart:io';
 import 'package:path_provider/path_provider.dart';
 
 import '../data/database_helper.dart';
+import '../data/gastos_repository.dart';
 import '../models/gasto.dart';
 import '../models/backup_document.dart';
 import '../models/recurring_expense.dart';
-import 'notification_service.dart';
 
 /// Backup de todos os meses, incluindo contas pagas e vencimentos.
 class BackupService {
@@ -14,22 +14,38 @@ class BackupService {
     : _directoryProvider =
           directoryProvider ?? getApplicationDocumentsDirectory;
   final Future<Directory> Function() _directoryProvider;
+
+  /// Quantidade de backups locais mantidos; os mais antigos são apagados.
+  static const int maxBackupsLocais = 10;
+
+  /// Prefixo dos novos arquivos; o antigo continua aceito na restauração.
+  static const String prefixo = 'diazen_backup_';
+  static const List<String> _prefixos = [
+    prefixo,
+    'quitora_backup_',
+    'quita_backup_',
+    'finantech_backup_',
+  ];
+
+  static int _carimbo(File file) {
+    final nome = file.path.split(Platform.pathSeparator).last;
+    final digitos = RegExp(r'(\d+)\.json$').firstMatch(nome)?.group(1);
+    return int.tryParse(digitos ?? '') ?? 0;
+  }
+
+  /// Backups locais, do mais recente para o mais antigo.
   Future<List<File>> listarBackupsLocais() async {
     final directory = await _directoryProvider();
     final files = await directory
         .list()
-        .where(
-          (entry) =>
-              entry is File &&
-              entry.path
-                  .split(Platform.pathSeparator)
-                  .last
-                  .startsWith('finantech_backup_') &&
-              entry.path.endsWith('.json'),
-        )
+        .where((entry) {
+          if (entry is! File || !entry.path.endsWith('.json')) return false;
+          final nome = entry.path.split(Platform.pathSeparator).last;
+          return _prefixos.any(nome.startsWith);
+        })
         .cast<File>()
         .toList();
-    files.sort((a, b) => b.path.compareTo(a.path));
+    files.sort((a, b) => _carimbo(b).compareTo(_carimbo(a)));
     return files;
   }
 
@@ -52,15 +68,28 @@ class BackupService {
     );
     final rows = snapshot.gastos;
     final rules = snapshot.regras.map(RecurringExpense.fromMap).toList();
+    final content = encode(rows.map(Gasto.fromMap).toList(), recorrencias: rules);
+    // Falha agora, e não na restauração, se algum dado não puder ser lido de
+    // volta (por exemplo um ano fora de 2000–2100).
+    BackupDocument.decode(content);
     final directory = await _directoryProvider();
     final file = File(
-      '${directory.path}/finantech_backup_${DateTime.now().microsecondsSinceEpoch}.json',
+      '${directory.path}/$prefixo${DateTime.now().microsecondsSinceEpoch}.json',
     );
-    await file.writeAsString(
-      encode(rows.map(Gasto.fromMap).toList(), recorrencias: rules),
-      flush: true,
-    );
+    await file.writeAsString(content, flush: true);
+    await _rotacionar();
     return file.path;
+  }
+
+  Future<void> _rotacionar() async {
+    final files = await listarBackupsLocais();
+    for (final antigo in files.skip(maxBackupsLocais)) {
+      try {
+        await antigo.delete();
+      } on FileSystemException {
+        // Um arquivo preso não impede o backup recém-criado.
+      }
+    }
   }
 
   /// A transação impede restaurações parciais em caso de falha.
@@ -84,6 +113,6 @@ class BackupService {
       }
       await batch.commit(noResult: true);
     });
-    await NotificationService().refreshAfterChange();
+    GastosRepository.notificarAlteracao();
   }
 }
