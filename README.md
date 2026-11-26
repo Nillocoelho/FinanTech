@@ -1,7 +1,7 @@
-# 💰 FinanTech - Controle de Gastos Mensais
+# 💰 Diazen - Controle de Gastos Mensais
 
 <p align="center">
-  <img src="assets/images/icon.png" alt="FinanTech Logo" width="120"/>
+  <img src="assets/images/icon.png" alt="Diazen Logo" width="120"/>
 </p>
 
 <p align="center">
@@ -18,7 +18,7 @@
 
 ## 📖 Sobre o Projeto
 
-O **FinanTech** é um aplicativo mobile desenvolvido em Flutter para gerenciamento de gastos mensais. Com uma interface moderna e intuitiva em tema escuro, você pode registrar, acompanhar e organizar todas as suas despesas de forma simples e eficiente.
+O **Diazen** é um aplicativo mobile desenvolvido em Flutter para gerenciamento de gastos mensais. Com uma interface moderna e intuitiva em tema escuro, você pode registrar, acompanhar e organizar todas as suas despesas de forma simples e eficiente.
 
 Todos os dados ficam armazenados localmente no seu dispositivo usando SQLite, garantindo privacidade e funcionamento offline.
 
@@ -112,10 +112,10 @@ lib/
 
 ```bash
 # Clone o repositório
-git clone https://github.com/Nillocoelho/FinanTech.git
+git clone https://github.com/Nillocoelho/Diazen.git
 
 # Entre na pasta do projeto
-cd FinanTech
+cd Diazen
 
 # Instale as dependências
 flutter pub get
